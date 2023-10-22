@@ -57,6 +57,7 @@ import java.util.function.BiFunction;
 
 import com.headius.backport9.stack.StackWalker;
 import org.jcodings.Encoding;
+import org.joni.Matcher;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.exceptions.MainExitException;
@@ -1806,6 +1807,49 @@ public class RubyThread extends RubyObject implements ExecutionContext {
         public void wakeup(RubyThread thread, Data data);
     }
 
+    /**
+     * Execute an interruptible regexp operation with the given function and bytess.
+     *
+     * @param context the current context
+     * @param data a data object
+     * @param bytes the bytes to write
+     * @param start start range of bytes to write
+     * @param length length of bytes to write
+     * @param task the write task
+     * @param <Data> the type of the data object
+     * @return the number of bytes written
+     * @throws InterruptedException
+     */
+    public <Data> int executeRegexp(
+            ThreadContext context,
+            Matcher matcher, int start, int range, int option,
+            RegexMatch task) throws InterruptedException {
+        Status oldStatus = STATUS.get(this);
+        try {
+            this.unblockArg = matcher;
+            this.unblockFunc = task;
+
+            // check for interrupt before going into blocking call
+            blockingThreadPoll(context);
+
+            STATUS.set(this, Status.SLEEP);
+
+            return task.run(matcher, start, range, option);
+        } finally {
+            STATUS.set(this, oldStatus);
+            this.unblockFunc = null;
+            this.unblockArg = null;
+            pollThreadEvents(context);
+        }
+    }
+
+    public interface RegexMatch extends Unblocker<Matcher> {
+        public int run(Matcher matcher, int start, int range, int option) throws InterruptedException;
+        public default void wakeup(RubyThread thread, Matcher matcher) {
+            thread.getNativeThread().interrupt();
+        }
+    }
+
     public void enterSleep() {
         STATUS.set(this, Status.SLEEP);
     }
@@ -2178,7 +2222,7 @@ public class RubyThread extends RubyObject implements ExecutionContext {
                         if (result == 1) {
                             Set<SelectionKey> keySet = currentSelector.selectedKeys();
 
-                            if (keySet.iterator().next() == key) {
+                            if (keySet.contains(key) && key.isValid()) {
                                 return true;
                             }
                         }
