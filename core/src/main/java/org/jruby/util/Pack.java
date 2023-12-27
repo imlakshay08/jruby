@@ -44,6 +44,7 @@ import org.jcodings.specific.ASCIIEncoding;
 import org.jcodings.specific.USASCIIEncoding;
 import org.jcodings.specific.UTF8Encoding;
 import org.jruby.*;
+import org.jruby.exceptions.RangeError;
 import org.jruby.platform.Platform;
 import org.jruby.runtime.Block;
 import org.jruby.runtime.ThreadContext;
@@ -478,6 +479,44 @@ public class Pack {
         };
         converters['q' + BE] = tmp;
         if (Platform.BIT_WIDTH == 64) converters['j' + BE] = tmp;
+
+        // pointer; we can't provide a real pointer, so we just use identity hashcode
+        tmp = new QuadConverter(8) {
+            @Override
+            public IRubyObject decode(Ruby runtime, ByteBuffer format) {
+                return runtime.getNil();
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject from, ByteList result) {
+                if (from.isNil()) {
+                    encodeLongBigEndian(result, 0);
+                } else {
+                    encodeLongBigEndian(result, System.identityHashCode(from));
+                }
+            }
+        };
+
+        converters['p'] = tmp;
+
+        // pointer; we can't provide a real pointer, so we just use identity hashcode
+        tmp = new QuadConverter(8) {
+            @Override
+            public IRubyObject decode(Ruby runtime, ByteBuffer format) {
+                return runtime.getNil();
+            }
+
+            @Override
+            public void encode(Ruby runtime, IRubyObject from, ByteList result) {
+                if (from.isNil()) {
+                    encodeLongBigEndian(result, 0);
+                } else {
+                    encodeLongBigEndian(result, System.identityHashCode(from.convertToString()));
+                }
+            }
+        };
+
+        converters['P'] = tmp;
     }
 
     public static int unpackInt_i(ByteBuffer enc) {
@@ -499,7 +538,7 @@ public class Pack {
         return result;
     }
 
-    public static void encodeUM(Ruby runtime, ByteList lCurElemString, int occurrences, boolean ignoreStar, char type, ByteList result) {
+    private static void encodeUM(Ruby runtime, ByteList lCurElemString, int occurrences, boolean ignoreStar, char type, ByteList result) {
         if (occurrences == 0 && type == 'm' && !ignoreStar) {
             encodes(runtime, result, lCurElemString.getUnsafeBytes(),
                     lCurElemString.getBegin(), lCurElemString.length(),
@@ -578,12 +617,12 @@ public class Pack {
         return io2Append;
     }
 
-    public static RubyArray unpack(Ruby runtime, ByteList encodedString, ByteList formatString) {
-        return unpackWithBlock(runtime.getCurrentContext(), runtime, encodedString, formatString, Block.NULL_BLOCK);
+    public static RubyArray unpack(ThreadContext context, ByteList encodedString, ByteList formatString) {
+        return unpackWithBlock(context, RubyString.newStringLight(context.runtime, encodedString), formatString, Block.NULL_BLOCK);
     }
 
     /**
-     * @see Pack#unpackWithBlock(ThreadContext, Ruby, ByteList, ByteList, Block)
+     * @see Pack#unpackWithBlock(ThreadContext, RubyString, ByteList, Block)
      * @param context
      * @param encoded
      * @param formatString
@@ -997,6 +1036,7 @@ public class Pack {
                     do {
                         occurrences = occurrences * 10 + Character.digit((char)(next & 0xFF), 10);
                         next = safeGet(format);
+                        if (occurrences < 0) throw runtime.newRangeError("pack length too big");
                     } while (next != 0 && ASCII.isDigit(next));
                 } else {
                     occurrences = type == '@' ? 0 : 1;
@@ -1560,29 +1600,11 @@ public class Pack {
     }
 
     private static void unpack_at(Ruby runtime, ByteList encodedString, ByteBuffer encode, int occurrences) {
-        try {
-            int limit;
-            if (occurrences == IS_STAR) {
-                limit = checkLimit(runtime, encode, encodedString.begin() + encode.remaining());
-            } else {
-                limit = checkLimit(runtime, encode, encodedString.begin() + occurrences);
-            }
-            positionBuffer(encode, limit);
-        } catch (IllegalArgumentException iae) {
-            throw runtime.newArgumentError("@ outside of string");
-        }
-    }
+        int limit = encodedString.begin() + (occurrences == IS_STAR ? encode.remaining() : occurrences);
 
-    private static int checkLimit(Ruby runtime, ByteBuffer encode, int limit) {
-        if (limit >= encode.capacity() || limit < 0) {
-            throw runtime.newRangeError("pack length too big");
-        }
-        return limit;
-    }
+        if (limit > encode.limit() || limit < 0) throw runtime.newArgumentError("@ outside of string");
 
-    @Deprecated
-    public static RubyArray unpackWithBlock(ThreadContext context, Ruby runtime, ByteList encodedString, ByteList formatString, Block block) {
-        return unpackWithBlock(context, RubyString.newStringLight(runtime, encodedString), formatString, block);
+        positionBuffer(encode, limit);
     }
 
     private static void appendOrYield(ThreadContext context, Block block, RubyArray result, IRubyObject item, int mode) {
@@ -1757,7 +1779,7 @@ public class Pack {
         return context.nil;
     }
 
-    public static int encode(Ruby runtime, int occurrences, ByteList result,
+    private static int encode(Ruby runtime, int occurrences, ByteList result,
             RubyArray list, int index, ConverterExecutor converter) {
         int listSize = list.size();
 
@@ -1883,27 +1905,6 @@ public class Pack {
         }
         i2Grow.append(iPads, 0, iLength);
         return i2Grow;
-    }
-
-    /**
-     * Same as pack but defaults tainting of output to false.
-     */
-    public static RubyString pack(Ruby runtime, RubyArray list, ByteList formatString) {
-        RubyString buffer = runtime.newString();
-        return packCommon(runtime.getCurrentContext(), list, formatString, executor(), buffer);
-    }
-
-    @Deprecated
-    public static RubyString pack(ThreadContext context, Ruby runtime, RubyArray list, RubyString formatString) {
-        RubyString buffer = runtime.newString();
-        return pack(context, list, formatString, buffer);
-    }
-
-    @Deprecated
-    public static void decode(ThreadContext context, Ruby runtime, ByteBuffer encode, int occurrences,
-          RubyArray result, Block block, Converter converter) {
-        decode(context, runtime, encode, occurrences,
-            result, block, converter, block.isGiven() ? UNPACK_BLOCK : UNPACK_ARRAY);
     }
 
     public static RubyString pack(ThreadContext context, RubyArray list, RubyString formatString, RubyString buffer) {
@@ -2140,17 +2141,18 @@ public class Pack {
     }
 
     private static void pack_U(ThreadContext context, RubyArray list, ByteList result, PackInts packInts, int occurrences) {
+        Ruby runtime = context.runtime;
         while (occurrences-- > 0) {
-            if (packInts.listSize-- <= 0) throw context.runtime.newArgumentError(sTooFew);
+            if (packInts.listSize-- <= 0) throw runtime.newArgumentError(sTooFew);
 
             IRubyObject from = list.eltInternal(packInts.idx++);
             int code = from == context.nil ? 0 : RubyNumeric.num2int(from);
 
-            if (code < 0) throw context.runtime.newRangeError("pack(U): value out of range");
+            if (code < 0) throw runtime.newRangeError("pack(U): value out of range");
 
             int len = result.getRealSize();
             result.ensure(len + 6);
-            result.setRealSize(len + utf8Decode(context.runtime, result.getUnsafeBytes(), result.getBegin() + len, code));
+            result.setRealSize(len + utf8Decode(runtime, result.getUnsafeBytes(), result.getBegin() + len, code));
         }
     }
 
@@ -2671,6 +2673,35 @@ public class Pack {
      */
     private static void encodeShortBigEndian(ByteList result, int s) {
         result.append((byte) ((s & 0xff00) >> 8)).append((byte) (s & 0xff));
+    }
+
+    @Deprecated
+    public static RubyArray unpack(Ruby runtime, ByteList encodedString, ByteList formatString) {
+        return unpackWithBlock(runtime.getCurrentContext(), runtime, encodedString, formatString, Block.NULL_BLOCK);
+    }
+
+    @Deprecated
+    public static RubyString pack(Ruby runtime, RubyArray list, ByteList formatString) {
+        RubyString buffer = runtime.newString();
+        return packCommon(runtime.getCurrentContext(), list, formatString, executor(), buffer);
+    }
+
+    @Deprecated
+    public static RubyString pack(ThreadContext context, Ruby runtime, RubyArray list, RubyString formatString) {
+        RubyString buffer = runtime.newString();
+        return pack(context, list, formatString, buffer);
+    }
+
+    @Deprecated
+    public static void decode(ThreadContext context, Ruby runtime, ByteBuffer encode, int occurrences,
+                              RubyArray result, Block block, Converter converter) {
+        decode(context, runtime, encode, occurrences,
+                result, block, converter, block.isGiven() ? UNPACK_BLOCK : UNPACK_ARRAY);
+    }
+
+    @Deprecated
+    public static RubyArray unpackWithBlock(ThreadContext context, Ruby runtime, ByteList encodedString, ByteList formatString, Block block) {
+        return unpackWithBlock(context, RubyString.newStringLight(runtime, encodedString), formatString, block);
     }
 
 }

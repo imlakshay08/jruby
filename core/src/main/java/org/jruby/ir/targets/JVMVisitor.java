@@ -44,12 +44,14 @@ import org.jruby.ir.interpreter.FullInterpreterContext;
 import org.jruby.ir.operands.Boolean;
 import org.jruby.ir.operands.Float;
 import org.jruby.ir.operands.*;
+import org.jruby.ir.operands.Integer;
 import org.jruby.ir.persistence.IRDumper;
 import org.jruby.ir.representations.BasicBlock;
 import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.ir.targets.IRBytecodeAdapter.BlockPassType;
-import org.jruby.ir.targets.indy.Bootstrap;
 import org.jruby.ir.targets.indy.CallTraceSite;
+import org.jruby.ir.targets.indy.CoverageSite;
+import org.jruby.ir.targets.indy.MetaClassBootstrap;
 import org.jruby.parser.StaticScope;
 import org.jruby.runtime.ArgumentDescriptor;
 import org.jruby.runtime.Block;
@@ -57,7 +59,6 @@ import org.jruby.runtime.CallType;
 import org.jruby.runtime.DynamicScope;
 import org.jruby.runtime.Frame;
 import org.jruby.runtime.Helpers;
-import org.jruby.runtime.RubyEvent;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.Visibility;
 import org.jruby.runtime.builtin.IRubyObject;
@@ -641,6 +642,7 @@ public class JVMVisitor extends IRVisitor {
             switch (((TemporaryLocalVariable)variable).getType()) {
             case FLOAT: return jvm.methodData().local(variable, JVM.DOUBLE_TYPE);
             case FIXNUM: return jvm.methodData().local(variable, JVM.LONG_TYPE);
+            case INT: return jvm.methodData().local(variable, JVM.INT_TYPE);
             case BOOLEAN: return jvm.methodData().local(variable, JVM.BOOLEAN_TYPE);
             default: return jvm.methodData().local(variable);
             }
@@ -666,10 +668,12 @@ public class JVMVisitor extends IRVisitor {
             genSetValue((LocalVariable) variable);
         } else if (variable instanceof TemporaryLocalVariable) {
             switch (((TemporaryLocalVariable)variable).getType()) {
-            case FLOAT: jvmAdapter().dstore(getJVMLocalVarIndex(variable)); break;
-            case FIXNUM: jvmAdapter().lstore(getJVMLocalVarIndex(variable)); break;
-            case BOOLEAN: jvmAdapter().istore(getJVMLocalVarIndex(variable)); break;
-            default: jvmMethod().storeLocal(getJVMLocalVarIndex(variable)); break;
+                case FLOAT: jvmAdapter().dstore(getJVMLocalVarIndex(variable)); break;
+                case FIXNUM: jvmAdapter().lstore(getJVMLocalVarIndex(variable)); break;
+                case INT:
+                case BOOLEAN:
+                    jvmAdapter().istore(getJVMLocalVarIndex(variable)); break;
+                default: jvmMethod().storeLocal(getJVMLocalVarIndex(variable)); break;
             }
         } else {
             jvmMethod().storeLocal(getJVMLocalVarIndex(variable));
@@ -689,7 +693,9 @@ public class JVMVisitor extends IRVisitor {
             switch (((TemporaryLocalVariable)variable).getType()) {
                 case FLOAT: jvmAdapter().dstore(getJVMLocalVarIndex(variable)); break;
                 case FIXNUM: jvmAdapter().lstore(getJVMLocalVarIndex(variable)); break;
-                case BOOLEAN: jvmAdapter().istore(getJVMLocalVarIndex(variable)); break;
+                case INT:
+                case BOOLEAN:
+                    jvmAdapter().istore(getJVMLocalVarIndex(variable)); break;
                 default: jvmMethod().storeLocal(getJVMLocalVarIndex(variable)); break;
             }
         } else {
@@ -729,6 +735,7 @@ public class JVMVisitor extends IRVisitor {
             switch (((TemporaryLocalVariable)variable).getType()) {
             case FLOAT: jvmAdapter().dload(getJVMLocalVarIndex(variable)); break;
             case FIXNUM: jvmAdapter().lload(getJVMLocalVarIndex(variable)); break;
+            case INT: jvmAdapter().iload(getJVMLocalVarIndex(variable)); break;
             case BOOLEAN: jvmAdapter().iload(getJVMLocalVarIndex(variable)); break;
             default: jvmMethod().loadLocal(getJVMLocalVarIndex(variable)); break;
             }
@@ -772,6 +779,14 @@ public class JVMVisitor extends IRVisitor {
     }
 
     @Override
+    public void AsFixnumInstr(AsFixnumInstr fixnum) {
+        jvmMethod().getValueCompiler().pushRuntime();
+        visit(fixnum.getOperand1());
+        jvmAdapter().invokestatic(p(RubyFixnum.class), "newFixnum", sig(RubyFixnum.class, Ruby.class, int.class));
+        jvmStoreLocal(fixnum.getResult());
+    }
+
+    @Override
     public void AsStringInstr(AsStringInstr asstring) {
         jvmMethod().loadContext();
         jvmMethod().loadSelf();
@@ -805,6 +820,32 @@ public class JVMVisitor extends IRVisitor {
         visit(blockGivenInstr.getBlockArg());
         jvmMethod().invokeIRHelper("isBlockGiven", sig(RubyBoolean.class, ThreadContext.class, Object.class));
         jvmStoreLocal(blockGivenInstr.getResult());
+    }
+
+    @Override
+    public void BIntInstr(BIntInstr bIntInstr) {
+        visit(bIntInstr.getArg1());
+        visit(bIntInstr.getArg2());
+        switch (bIntInstr.getOp()) {
+            case LT:
+                jvmAdapter().if_icmplt(getJVMLabel(bIntInstr.getJumpTarget()));
+                break;
+            case GT:
+                jvmAdapter().if_icmpgt(getJVMLabel(bIntInstr.getJumpTarget()));
+                break;
+            case LTE:
+                jvmAdapter().if_icmple(getJVMLabel(bIntInstr.getJumpTarget()));
+                break;
+            case GTE:
+                jvmAdapter().if_icmpge(getJVMLabel(bIntInstr.getJumpTarget()));
+                break;
+            case EQ:
+                jvmAdapter().if_icmpeq(getJVMLabel(bIntInstr.getJumpTarget()));
+                break;
+            case NEQ:
+                jvmAdapter().if_icmpne(getJVMLabel(bIntInstr.getJumpTarget()));
+                break;
+        }
     }
 
     private void loadFloatArg(Operand arg) {
@@ -1391,6 +1432,7 @@ public class JVMVisitor extends IRVisitor {
     public void DefineClassMethodInstr(DefineClassMethodInstr defineclassmethodinstr) {
         IRMethod method = defineclassmethodinstr.getMethod();
 
+        jvmMethod().updateLineNumber(method.getLine());
         jvmMethod().loadContext();
 
         JVMVisitorMethodContext context = new JVMVisitorMethodContext();
@@ -1426,6 +1468,7 @@ public class JVMVisitor extends IRVisitor {
         IRBytecodeAdapter   m = jvmMethod();
         SkinnyMethodAdapter a = m.adapter;
 
+        jvmMethod().updateLineNumber(method.getLine());
         m.loadContext();
 
         emitMethod(method, context);
@@ -1515,7 +1558,7 @@ public class JVMVisitor extends IRVisitor {
         jvmAdapter().invokedynamic(
                 "openMetaClass",
                 sig(DynamicMethod.class, ThreadContext.class, IRubyObject.class, String.class, StaticScope.class),
-                Bootstrap.OPEN_META_CLASS,
+                MetaClassBootstrap.OPEN_META_CLASS,
                 bodyHandle,
                 scopeHandle,
                 setScopeHandle,
@@ -1709,6 +1752,29 @@ public class JVMVisitor extends IRVisitor {
     }
 
     @Override
+    public void IntegerMathInstr(IntegerMathInstr instr) {
+        visit(instr.getOperand1());
+        visit(instr.getOperand2());
+        switch (instr.getOp()) {
+            case ADD:
+                jvmAdapter().iadd();
+                break;
+            case SUBTRACT:
+                jvmAdapter().isub();
+                break;
+            case MULTIPLY:
+                jvmAdapter().imul();
+                break;
+            case DIVIDE:
+                jvmAdapter().idiv();
+                break;
+            default:
+                throw new NotCompilableException("IntegerMathInstr has unknown op: " + instr);
+        }
+        jvmStoreLocal(instr.getResult());
+    }
+
+    @Override
     public void JumpInstr(JumpInstr jumpinstr) {
         jvmMethod().goTo(getJVMLabel(jumpinstr.getJumpTarget()));
     }
@@ -1738,7 +1804,7 @@ public class JVMVisitor extends IRVisitor {
             jvmAdapter().invokedynamic(
                     "coverLine",
                     sig(void.class, ThreadContext.class),
-                    Bootstrap.coverLineHandle(),
+                    CoverageSite.COVER_LINE_BOOTSTRAP,
                     jvm.methodData().scope.getFile(),
                     linenumberinstr.getLineNumber(),
                     linenumberinstr.oneshot ? 1 : 0);
@@ -1918,8 +1984,7 @@ public class JVMVisitor extends IRVisitor {
     public void ProcessModuleBodyInstr(ProcessModuleBodyInstr processmodulebodyinstr) {
         jvmMethod().loadContext();
         visit(processmodulebodyinstr.getModuleBody());
-        visit(processmodulebodyinstr.getBlock());
-        jvmMethod().invokeIRHelper("invokeModuleBody", sig(IRubyObject.class, ThreadContext.class, DynamicMethod.class, Block.class));
+        jvmMethod().invokeIRHelper("invokeModuleBody", sig(IRubyObject.class, ThreadContext.class, DynamicMethod.class));
         jvmStoreLocal(processmodulebodyinstr.getResult());
     }
 
@@ -2344,6 +2409,12 @@ public class JVMVisitor extends IRVisitor {
                 jvmAdapter().invokestatic(p(IRRuntimeHelpers.class), "isHashEmpty", sig(IRubyObject.class, ThreadContext.class, IRubyObject.class));
                 jvmStoreLocal(runtimehelpercall.getResult());
                 break;
+            case ARRAY_LENGTH:
+                visit(runtimehelpercall.getArgs()[0]);
+                jvmAdapter().checkcast(p(RubyArray.class));
+                jvmMethod().invokeIRHelper("arrayLength", sig(int.class, RubyArray.class));
+                jvmStoreLocal(runtimehelpercall.getResult());
+                break;
             default:
                 throw new NotCompilableException("Unknown IR runtime helper method: " + runtimehelpercall.getHelperMethod() + "; INSTR: " + this);
         }
@@ -2731,6 +2802,11 @@ public class JVMVisitor extends IRVisitor {
     }
 
     @Override
+    public void Integer(Integer integer) {
+        jvmAdapter().pushInt(integer.value);
+    }
+
+    @Override
     public void LocalVariable(LocalVariable localvariable) {
         IRBytecodeAdapter m = jvmMethod();
 
@@ -2883,6 +2959,11 @@ public class JVMVisitor extends IRVisitor {
     @Override
     public void TemporaryFixnumVariable(TemporaryFixnumVariable temporaryfixnumvariable) {
         jvmLoadLocal(temporaryfixnumvariable);
+    }
+
+    @Override
+    public void TemporaryIntVariable(TemporaryIntVariable temporaryintvariable) {
+        jvmLoadLocal(temporaryintvariable);
     }
 
     @Override
