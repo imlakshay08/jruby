@@ -44,13 +44,13 @@ default_gems = [
     # https://github.com/ruby/fcntl/issues/9
     # ['fcntl', '1.0.1'],
     ['ffi', '1.16.3'],
-    # ['fiddle', '1.1.0'],
+    ['fiddle', '1.1.4'],
     ['fileutils', '1.6.0'],
     ['find', '0.1.1'],
     ['forwardable', '1.3.2'],
     # ['gdbm', '2.1.0'],
     ['getoptlong', '0.1.1'],
-    ['io-console', '0.5.11'],
+    ['io-console', '0.7.2'],
     # https://github.com/ruby/io-nonblock/issues/4
     # ['io-nonblock', '0.1.0'],
     ['io-wait', '0.3.0'],
@@ -58,14 +58,13 @@ default_gems = [
     ['irb', '1.4.2'],
     ['jar-dependencies', '0.4.1'],
     ['jruby-readline', '1.3.7'],
-    ['jruby-openssl', '0.14.2'],
-    ['json', '2.6.1'],
+    ['jruby-openssl', '0.15.0'],
+    ['json', '2.7.1'],
     ['logger', '1.5.1'],
     ['mutex_m', '0.1.1'],
     ['net-http', '0.3.0'],
     ['net-protocol', '0.1.2'],
-    # Partial implementation in JRuby, unsure whether this is important
-    # ['nkf', '0.1.1'],
+    ['nkf', '0.2.0'],
     ['observer', '0.1.1'],
     ['open3', '0.1.2'],
     # https://github.com/ruby/openssl/issues/20#issuecomment-1022872855
@@ -81,12 +80,12 @@ default_gems = [
     ['psych', '5.1.1.1'],
     ['racc', '1.6.0'],
     ['rake-ant', '1.0.6'],
-    ['rdoc', '6.4.0'],
+    ['rdoc', '6.4.1.1'],
     # https://github.com/ruby/readline/issues/5
     # ['readline', '0.0.3'],
     # Will be solved with readline
     # ['readline-ext', '0.1.4'],
-    ['reline', '0.3.5'],
+    ['reline', '0.4.2'],
     # https://github.com/ruby/resolv/issues/19
     # ['resolv', '0.2.1'],
     ['resolv-replace', '0.1.0'],
@@ -97,8 +96,8 @@ default_gems = [
     # ['set', '1.0.2'],
     ['shellwords', '0.1.0'],
     ['singleton', '0.1.1'],
-    ['stringio', '3.0.8'],
-    ['strscan', '3.0.7'],
+    ['stringio', '3.1.2'],
+    ['strscan', '3.1.0'],
     ['subspawn', '0.1.1'], # has 3 transitive deps:
       ['subspawn-posix', '0.1.1'],
       ['ffi-binary-libfixposix', '0.5.1.1'],
@@ -113,7 +112,7 @@ default_gems = [
     # ['tmpdir', '0.1.2'],
     ['tsort', '0.1.0'],
     ['un', '0.2.0'],
-    ['uri', '0.12.1'],
+    ['uri', '0.12.2'],
     ['weakref', '0.1.1'],
     # https://github.com/ruby/win32ole/issues/12
     # ['win32ole', '1.8.8'],
@@ -127,7 +126,7 @@ bundled_gems = [
     # ['debug', '1.4.0'],
     ['matrix', '0.4.2'],
     ['minitest', '5.15.0'],
-    ['net-ftp', '0.1.3'],
+    ['net-ftp', '0.3.7'],
     ['net-imap', '0.2.3'],
     ['net-pop', '0.1.1'],
     ['net-smtp', '0.3.1'],
@@ -136,7 +135,7 @@ bundled_gems = [
     ['rake', '${rake.version}'],
     # Depends on many CRuby internals
     # ['rbs', '2.0.0'],
-    ['rexml', '3.2.5'],
+    ['rexml', '3.3.9'],
     ['rss', '0.2.9'],
     ['test-unit', '3.5.3'],
     # Depends on many CRuby internals
@@ -251,6 +250,18 @@ project 'JRuby Lib Setup' do
     # force Ruby command to "jruby" for the generated Windows bat files since we install using 9.1.17.0 jar file
     Gem.singleton_class.send(:define_method, :ruby) do
       File.join(global_bin, "jruby#{RbConfig::CONFIG['EXEEXT']}")
+    end
+
+    # Disable extension build for gems (none of ours require a build)
+    class Gem::Ext::Builder
+      def build_extensions
+        return if @spec.extensions.empty?
+
+        say "Skipping native extensions."
+
+        FileUtils.mkdir_p File.dirname(@spec.gem_build_complete_path)
+        FileUtils.touch @spec.gem_build_complete_path
+      end
     end
 
     ctx.project.artifacts.select do |a|

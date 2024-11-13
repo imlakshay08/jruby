@@ -41,15 +41,15 @@ import org.jruby.internal.runtime.methods.IRMethodArgs;
 import org.jruby.internal.runtime.methods.PartialDelegatingMethod;
 import org.jruby.internal.runtime.methods.ProcMethod;
 import org.jruby.runtime.ArgumentDescriptor;
+import org.jruby.runtime.ArgumentType;
 import org.jruby.runtime.Block;
 import org.jruby.runtime.ClassIndex;
 import org.jruby.runtime.Helpers;
+import org.jruby.runtime.JavaSites;
 import org.jruby.runtime.MethodBlockBody;
 import org.jruby.runtime.ObjectAllocator;
-import org.jruby.runtime.PositionAware;
 import org.jruby.runtime.Signature;
 import org.jruby.runtime.ThreadContext;
-import org.jruby.runtime.backtrace.TraceType;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.runtime.callsite.CacheEntry;
 
@@ -154,19 +154,19 @@ public class RubyMethod extends AbstractRubyMethod {
         return getRuntime().newFixnum(method.getSignature().arityValue());
     }
 
-    @JRubyMethod(name = "eql?", required = 1)
+    @JRubyMethod(name = "eql?")
     public IRubyObject op_eql(ThreadContext context, IRubyObject other) {
         return op_equal(context, other);
     }
 
     @Override
-    @JRubyMethod(name = "==", required = 1)
+    @JRubyMethod(name = "==")
     public RubyBoolean op_equal(ThreadContext context, IRubyObject other) {
         return RubyBoolean.newBoolean(context,  equals(other) );
     }
 
     @Override
-    @JRubyMethod(name = "===", required = 1)
+    @JRubyMethod(name = "===")
     public IRubyObject op_eqq(ThreadContext context, IRubyObject other) {
         return method.call(context, receiver, sourceModule, methodName, other, Block.NULL_BLOCK);
     }
@@ -184,7 +184,7 @@ public class RubyMethod extends AbstractRubyMethod {
         }
 
         RubyMethod otherMethod = (RubyMethod)other;
-        return receiver == otherMethod.receiver && originModule == otherMethod.originModule &&
+        return receiver == otherMethod.receiver &&
             ( isSerialMatch(otherMethod.method) || isMethodMissingMatch(otherMethod.getMethod().getRealMethod()) );
     }
 
@@ -216,6 +216,7 @@ public class RubyMethod extends AbstractRubyMethod {
     public RubyMethod rbClone() {
         RubyMethod newMethod = newMethod(implementationModule, methodName, originModule, originName, entry, receiver);
         newMethod.setMetaClass(getMetaClass());
+        if (isFrozen()) newMethod.setFrozen(true);
         return newMethod;
     }
 
@@ -280,14 +281,14 @@ public class RubyMethod extends AbstractRubyMethod {
         if (mklass.isSingleton()) {
             IRubyObject attached = ((MetaClass) mklass).getAttached();
             if (receiver == null) {
-                str.cat19(inspect(context, mklass).convertToString());
+                str.catWithCodeRange(inspect(context, mklass).convertToString());
             } else if (receiver == attached) {
-                str.cat19(inspect(context, attached).convertToString());
+                str.catWithCodeRange(inspect(context, attached).convertToString());
                 sharp = ".";
             } else {
-                str.cat19(inspect(context, receiver).convertToString());
+                str.catWithCodeRange(inspect(context, receiver).convertToString());
                 str.catString("(");
-                str.cat19(inspect(context, attached).convertToString());
+                str.catWithCodeRange(inspect(context, attached).convertToString());
                 str.catString(")");
                 sharp = ".";
             }
@@ -323,12 +324,25 @@ public class RubyMethod extends AbstractRubyMethod {
         if (descriptors.length > 0) {
             RubyString desc = descriptors[0].asParameterName(context);
 
-            str.cat(desc);
-            for (int i = 1; i < descriptors.length; i++) {
-                desc = descriptors[i].asParameterName(context);
+            boolean specialDots = false;
+            if (descriptors.length == 3) {
+                // weirdly parameters will show these 3 params but inspect will figure out this was originally (...).
+                if (descriptors[0].type == ArgumentType.rest && "*".equals(descriptors[0].name.idString()) &&
+                        descriptors[1].type == ArgumentType.keyrest && "**".equals(descriptors[1].name.idString()) &&
+                        descriptors[2].type == ArgumentType.block && "&".equals(descriptors[2].name.idString())) {
+                    str.catString("...");
+                    specialDots = true;
+                }
+            }
 
-                str.catString(", ");
+            if (!specialDots) {
                 str.cat(desc);
+                for (int i = 1; i < descriptors.length; i++) {
+                    desc = descriptors[i].asParameterName(context);
+
+                    str.catString(", ");
+                    str.cat(desc);
+                }
             }
         }
         str.catString(")");
@@ -364,9 +378,16 @@ public class RubyMethod extends AbstractRubyMethod {
         return Helpers.methodToParameters(context.runtime, this);
     }
 
-    @JRubyMethod(optional = 1, checkArity = false)
-    public IRubyObject curry(ThreadContext context, IRubyObject[] args) {
-        return to_proc(context).callMethod(context, "curry", args);
+    @JRubyMethod
+    public IRubyObject curry(ThreadContext context) {
+        IRubyObject proc = to_proc(context);
+        return sites(context).curry.call(context, proc, proc);
+    }
+
+    @JRubyMethod
+    public IRubyObject curry(ThreadContext context, IRubyObject arg0) {
+        IRubyObject proc = to_proc(context);
+        return sites(context).curry.call(context, proc, proc, arg0);
     }
 
     @JRubyMethod
@@ -395,6 +416,16 @@ public class RubyMethod extends AbstractRubyMethod {
 
     public IRubyObject getReceiver() {
         return receiver;
+    }
+
+    @Deprecated
+    public IRubyObject curry(ThreadContext context, IRubyObject[] args) {
+        IRubyObject proc = to_proc(context);
+        return sites(context).curry.call(context, proc, proc, args);
+    }
+
+    private static JavaSites.MethodSites sites(ThreadContext context) {
+        return context.sites.Method;
     }
 
 }

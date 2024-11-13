@@ -41,7 +41,11 @@ import java.io.OutputStream;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.io.PrintStream;
+import java.lang.invoke.LambdaMetafactory;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
@@ -192,6 +196,11 @@ public class ShellLauncher {
 
         public InputStream getErrorStream() {
             return processError;
+        }
+
+        public long pid() {
+            // no pid for a script so we return -1
+            return -1;
         }
 
         public int waitFor() throws InterruptedException {
@@ -433,7 +442,7 @@ public class ShellLauncher {
             pathObject = env.op_aref(runtime.getCurrentContext(), RubyString.newString(runtime, PATH_ENV));
         }
 
-        if (pathObject == null) {
+        if (pathObject.isNil() || pathObject.convertToString().size() == 0) {
             pathNodes = DEFAULT_PATH; // ASSUME: not modified by callee
         }
 
@@ -659,110 +668,159 @@ public class ShellLauncher {
     private static final Field UNIXProcess_pid;
     private static final Class ProcessImpl;
     private static final Field ProcessImpl_handle;
+    private static final Method ProcessImpl_pid;
     private interface PidGetter { long getPid(Process process); }
     private static final PidGetter PID_GETTER;
 
     static {
-        PidGetter pidGetter;
+        PidGetter pidGetter = null;
 
+        // try Java 9+ pid access:
+        try {
+            Method pid = Process.class.getMethod("pid");
+            pidGetter = (PidGetter) LambdaMetafactory.altMetafactory(
+                            MethodHandles.lookup(),
+                            "getPid",
+                            MethodType.methodType(PidGetter.class),
+                            MethodType.methodType(long.class, Process.class),
+                            MethodHandles.lookup().unreflect(pid),
+                            MethodType.methodType(long.class, Process.class),
+                            0)
+                    .dynamicInvoker().invoke();
+        } catch (Throwable t) {
+            // fall through to other options
+        }
+
+        // try reflective access to process internals
         Class up = null;
         Field pid = null;
-        try {
-            up = Class.forName("java.lang.UNIXProcess");
-        } catch (ClassNotFoundException e) {
+        Class pi = null;
+        Field handle = null;
+        Method pi_pid = null;
+
+        if (pidGetter == null) {
             try {
-                // Renamed in 11 (or earlier)
-                up = Class.forName("java.lang.ProcessImpl");
-            } catch (ClassNotFoundException e2) {
-                // ignore and try windows version
+                up = Class.forName("java.lang.UNIXProcess");
+            } catch (ClassNotFoundException e) {
+                try {
+                    // Renamed in 11 (or earlier)
+                    up = Class.forName("java.lang.ProcessImpl");
+                } catch (ClassNotFoundException e2) {
+                    // ignore and try windows version
+                }
+            }
+
+            if (up != null) {
+                try {
+                    pid = up.getDeclaredField("pid");
+                    if (!Java.trySetAccessible(pid)) pid = null;
+                } catch (NoSuchFieldException | SecurityException e) {
+                    // ignore and try windows version
+                }
+            }
+
+            try {
+                pi = Class.forName("java.lang.ProcessImpl");
+                handle = pi.getDeclaredField("handle");
+                if (!Java.trySetAccessible(handle)) {
+                    handle = null;
+                }
+            } catch (Exception e) {
+                // ignore and use hashcode
+            }
+
+            if (pi != null) {
+                try {
+                    pi_pid = pi.getMethod("pid");
+                    if (!Java.trySetAccessible(pi_pid)) {
+                        pi_pid = null;
+                        if (handle == null) pi = null;
+                    }
+                } catch (Exception e) {
+                    // ignore and use hashcode
+                }
+            }
+
+            if (pid != null) {
+                if (handle != null) {
+                    // try both
+                    pidGetter = ShellLauncher::getPidBoth;
+                } else {
+                    // just unix
+                    pidGetter = ShellLauncher::getPidUnix;
+                }
+            } else if (handle != null || pi_pid != null) {
+                // just windows
+                pidGetter = ShellLauncher::getPidWindows;
+            } else {
+                // neither - default PidGetter
+                pidGetter = Object::hashCode;
             }
         }
 
-        if (up != null) {
-            try {
-                pid = up.getDeclaredField("pid");
-                Java.trySetAccessible(pid);
-            } catch (NoSuchFieldException | SecurityException e) {
-                // ignore and try windows version
-            }
-        }
         UNIXProcess = up;
         UNIXProcess_pid = pid;
 
-        Class pi = null;
-        Field handle = null;
-        try {
-            pi = Class.forName("java.lang.ProcessImpl");
-            handle = pi.getDeclaredField("handle");
-            Java.trySetAccessible(handle);
-        } catch (Exception e) {
-            // ignore and use hashcode
-        }
         ProcessImpl = pi;
         ProcessImpl_handle = handle;
+        ProcessImpl_pid = pi_pid;
 
-        if (UNIXProcess_pid != null) {
-            if (ProcessImpl_handle != null) {
-                // try both
-                pidGetter = new PidGetter() {
-                    public long getPid(Process process) {
-                        try {
-                            if (UNIXProcess.isInstance(process)) {
-                                return (Integer)UNIXProcess_pid.get(process);
-                            } else if (ProcessImpl.isInstance(process)) {
-                                Long hproc = (Long) ProcessImpl_handle.get(process);
-                                return WindowsFFI.getKernel32().GetProcessId(hproc);
-                            }
-                        } catch (Exception e) {
-                            // ignore and use hashcode
-                        }
-                        return process.hashCode();
-                    }
-                };
-            } else {
-                // just unix
-                pidGetter = new PidGetter() {
-                    public long getPid(Process process) {
-                        try {
-                            if (UNIXProcess.isInstance(process)) {
-                                return (Integer)UNIXProcess_pid.get(process);
-                            }
-                        } catch (Exception e) {
-                            // ignore and use hashcode
-                        }
-                        return process.hashCode();
-                    }
-                };
-            }
-        } else if (ProcessImpl_handle != null) {
-            // just windows
-            pidGetter = new PidGetter() {
-                public long getPid(Process process) {
-                    try {
-                        if (ProcessImpl.isInstance(process)) {
-                            Long hproc = (Long) ProcessImpl_handle.get(process);
-                            return WindowsFFI.getKernel32().GetProcessId(hproc);
-                        }
-
-                    } catch (Exception e) {
-                        // ignore and use hashcode
-                    }
-                    return process.hashCode();
-                }
-            };
-        } else {
-            // neither - default PidGetter
-            pidGetter = new PidGetter() {
-                public long getPid(Process process) {
-                    return process.hashCode();
-                }
-            };
-        }
         PID_GETTER = pidGetter;
     }
 
     public static long reflectPidFromProcess(Process process) {
         return PID_GETTER.getPid(process);
+    }
+
+    private static long getPidBoth(Process process) {
+        try {
+            if (UNIXProcess.isInstance(process)) {
+                return getPidUnix(process);
+            } else if (ProcessImpl.isInstance(process)) {
+                return getPidWindows(process);
+            }
+        } catch (Exception e) {
+            // fall back on hashcode
+        }
+
+        return process.hashCode();
+    }
+
+    private static long getPidWindows(Process process) {
+        long pid = -1;
+        if (ProcessImpl_handle != null) {
+            try {
+                if (ProcessImpl.isInstance(process)) {
+                    Long hproc = (Long) ProcessImpl_handle.get(process);
+                    return WindowsFFI.getKernel32().GetProcessId(hproc);
+                }
+            } catch (Exception e) {
+                // fall back on pid logic
+            }
+        }
+
+        if (pid == -1 && ProcessImpl_pid != null) {
+            // JDK > 8 has a new way to look it up and also can't use "handle" field anymore
+            try {
+                return (long) ProcessImpl_pid.invoke(process);
+            } catch (Exception e2) {
+                // fall back on hashcode
+            }
+        }
+
+        return process.hashCode();
+    }
+
+    private static long getPidUnix(Process process) {
+        try {
+            if (UNIXProcess.isInstance(process)) {
+                return (Integer) UNIXProcess_pid.get(process);
+            }
+        } catch (Exception e) {
+            // fall back on hashcode
+        }
+
+        return process.hashCode();
     }
 
     public static Process run(Ruby runtime, IRubyObject string) throws IOException {
@@ -925,6 +983,10 @@ public class ShellLauncher {
 
         public FileChannel getOutput() {
             return outputChannel;
+        }
+
+        public long pid() {
+            return PID_GETTER.getPid(child);
         }
 
         public FileChannel getError() {

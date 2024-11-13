@@ -29,7 +29,6 @@
 
 package org.jruby.util.cli;
 
-import java.io.Console;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -58,6 +57,8 @@ public class Options {
     private static final boolean INVOKEDYNAMIC_DEFAULT = calculateInvokedynamicDefault();
     private static final boolean COLOR = System.console() != null;
 
+    public static final String IR_PRINT_PATTERN_NO_PATTERN_STRING = "<NO_PATTERN>";
+
     // This section holds all Options for JRuby. They will be listed in the
     // --properties output.
 
@@ -68,11 +69,12 @@ public class Options {
     public static final Option<Boolean> PARSER_WARN_ARGUMENT_PREFIX = bool(PARSER, "parser.warn.argument_prefix", true, "Warn about splat operators being interpreted as argument prefixes.");
     public static final Option<Boolean> PARSER_WARN_AMBIGUOUS_ARGUMENTS = bool(PARSER, "parser.warn.ambiguous_argument", true, "Warn about ambiguous arguments.");
     public static final Option<Boolean> PARSER_WARN_FLAGS_IGNORED = bool(PARSER, "parser.warn.flags_ignored", true, "Warn about ignored regex flags being ignored.");
+    public static final Option<Boolean> PARSER_SUMMARY = bool(PARSER, "parser.summary", false, "print out summary of parsing activities");
 
     public static final Option<CompileMode> COMPILE_MODE = enumeration(COMPILER, "compile.mode", CompileMode.class, CompileMode.JIT, "Set compilation mode. JIT = at runtime; FORCE = before execution.");
     public static final Option<Boolean> COMPILE_DUMP = bool(COMPILER, "compile.dump", false, "Dump to console all bytecode generated at runtime.");
     public static final Option<Boolean> COMPILE_INVOKEDYNAMIC = bool(COMPILER, "compile.invokedynamic", INVOKEDYNAMIC_DEFAULT, "Use invokedynamic for optimizing Ruby code.");
-    public static final Option<Boolean> COMPILE_CACHE_CLASSES = bool(COMPILER, "compile.cache.classes", false, "Use cache of compiled sript classes");
+    public static final Option<Boolean> COMPILE_CACHE_CLASSES = bool(COMPILER, "compile.cache.classes", false, "Use cache of compiled script classes");
     public static final Option<Boolean> COMPILE_CACHE_CLASSES_LOGGING = bool(COMPILER, "compile.cache.classes.logging", false, "Log whether cached script classes are being saved or used");
 
     public static final Option<Integer> INVOKEDYNAMIC_MAXFAIL = integer(INVOKEDYNAMIC, "invokedynamic.maxfail", 1000, "Maximum call site failures after which to inline cache.");
@@ -99,6 +101,7 @@ public class Options {
     public static final Option<ClassLoaderMode> JIT_LOADER_MODE = enumeration(JIT, "jit.loader.mode", ClassLoaderMode.class, ClassLoaderMode.UNIQUE, "Set JIT class loader to use. UNIQUE class loader per class; SHARED loader for all classes");
 
     public static final Option<String> IR_DEBUG_IGV          = string(IR, "ir.debug.igv", (String) null, "Specify file:line of scope to jump to IGV");
+    public static final Option<Boolean> IR_DEBUG_IGV_STDOUT = bool(IR, "ir.debug.igv.stdout", false, "Save IGV generated XML to stdout");
     public static final Option<Boolean> IR_DEBUG             = bool(IR, "ir.debug", false, "Debug generation of JRuby IR.");
     public static final Option<Boolean> IR_PROFILE           = bool(IR, "ir.profile", false, "[EXPT]: Profile IR code during interpretation.");
     public static final Option<Boolean> IR_COMPILER_DEBUG    = bool(IR, "ir.compiler.debug", false, "Debug compilation of JRuby IR.");
@@ -118,6 +121,7 @@ public class Options {
     public static final Option<Boolean>  IR_PRINT = bool(IR, "ir.print", IR_PRINT_ALL.load(), "Print the final IR to be run before starting to execute each body of code.");
     public static final Option<Boolean>  IR_PRINT_COLOR = bool(IR, "ir.print.color", COLOR, "Print the final IR with color highlighting.");
     public static final Option<Boolean>  IR_STRING_FREEZE = bool(IR, "ir.string.freeze", true, "Compile \"foo\".freeze as a constant frozen string value instead of a call.");
+    public static final Option<String> IR_PRINT_PATTERN = string(IR, "ir.print.pattern", IR_PRINT_PATTERN_NO_PATTERN_STRING, "A pattern to limit IR print output to specific scopes.");
 
     public static final Option<Boolean> NATIVE_ENABLED = bool(NATIVE, "native.enabled", true, "Enable/disable native code, including POSIX features and C exts.");
     public static final Option<Boolean> NATIVE_VERBOSE = bool(NATIVE, "native.verbose", false, "Enable verbose logging of native extension loading.");
@@ -158,8 +162,9 @@ public class Options {
     public static final Option<Boolean> USE_FIXNUM_CACHE = bool(MISCELLANEOUS, "fixnum.cache", true, "Use a cache of low-valued Fixnum objects.");
     public static final Option<Integer> FIXNUM_CACHE_RANGE = integer(MISCELLANEOUS, "fixnum.cache.size", 256, "Values to retrieve from Fixnum cache, in the range -X..(X-1).");
     public static final Option<Boolean> PACKED_ARRAYS = bool(MISCELLANEOUS, "packed.arrays", true, "Toggle whether to use \"packed\" arrays for small tuples.");
-    public static final Option<Boolean> REGEXP_INTERRUPTIBLE = bool(MISCELLANEOUS, "regexp.interruptible", true, "Allow regexp operations to be interuptible from Ruby.");
+    public static final Option<Boolean> REGEXP_INTERRUPTIBLE = bool(MISCELLANEOUS, "regexp.interruptible", true, "Allow regexp operations to be interruptible from Ruby.");
     public static final Option<Integer> JAR_CACHE_EXPIRATION = integer(MISCELLANEOUS, "jar.cache.expiration", 750, "The time (ms) between checks if a JAR file containing resources has been updated.");
+    public static final Option<String> WINDOWS_FILESYSTEM_ENCODING = string(MISCELLANEOUS, "windows.filesystem.encoding", "UTF-8", "The encoding to use for filesystem names and paths on Windows.");
 
     public static final Option<Boolean> DEBUG_LOADSERVICE = bool(DEBUG, "debug.loadService", false, "Log require/load file searches.");
     public static final Option<Boolean> DEBUG_LOADSERVICE_TIMING = bool(DEBUG, "debug.loadService.timing", false, "Log require/load parse+evaluate times.");
@@ -178,6 +183,9 @@ public class Options {
     public static final Option<String> LOGGER_CLASS = string(DEBUG, "logger.class", new String[]{"class name"}, "org.jruby.util.log.StandardErrorLogger", "Use specified class for logging.");
     public static final Option<Boolean> DUMP_INSTANCE_VARS = bool(DEBUG, "dump.variables", false, "Dump class + instance var names on first new of Object subclasses.");
     public static final Option<Boolean> REWRITE_JAVA_TRACE = bool(DEBUG, "rewrite.java.trace", true, "Rewrite stack traces from exceptions raised in Java calls.");
+
+    public static final Option<Boolean> PARSER_PRISM = bool(DEBUG, "parser.prism", false, "Parse and build Ruby using the prism parser.");
+    public static final Option<Boolean> PARSER_WASM = bool(DEBUG, "parser.prism.wasm", false, "Parse and build Ruby using the wasm prism parser.");
 
     public static final Option<Boolean> JI_SETACCESSIBLE = bool(JAVA_INTEGRATION, "ji.setAccessible", true, "Try to set inaccessible Java methods to be accessible.");
     public static final Option<Boolean> JI_UPPER_CASE_PACKAGE_NAME_ALLOWED = bool(JAVA_INTEGRATION, "ji.upper.case.package.name.allowed", false, "Allow Capitalized Java package names.");

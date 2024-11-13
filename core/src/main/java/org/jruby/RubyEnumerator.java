@@ -33,9 +33,7 @@ import org.jruby.anno.JRubyModule;
 import org.jruby.exceptions.StopIteration;
 import org.jruby.runtime.Arity;
 import org.jruby.runtime.Block;
-import org.jruby.runtime.BlockCallback;
 import org.jruby.runtime.CallBlock;
-import org.jruby.runtime.Helpers;
 import org.jruby.runtime.JavaSites;
 import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.Signature;
@@ -207,7 +205,7 @@ public class RubyEnumerator extends RubyObject implements java.util.Iterator<Obj
         int argc = Arity.checkArgumentCount(context, args, 2, 4);
 
         boolean keywords = (context.callInfo & CALL_KEYWORD) != 0 && (context.callInfo & ThreadContext.CALL_KEYWORD_EMPTY) == 0;
-        context.resetCallInfo();
+        ThreadContext.resetCallInfo(context);
 
         // Lazy.__from(enum, method, *args, size)
         IRubyObject object = args[0];
@@ -369,14 +367,14 @@ public class RubyEnumerator extends RubyObject implements java.util.Iterator<Obj
         if (recurse) {
             return result.catString("...>");
         } else {
-            result.cat19(RubyObject.inspect(context, object));
+            result.catWithCodeRange(RubyObject.inspect(context, object));
             result.cat(':');
-            result.cat19(getMethod().asString());
+            result.catWithCodeRange(getMethod().asString());
             if (methodArgs.length > 0) {
                 result.cat('(');
                 for (int i= 0; i < methodArgs.length; i++) {
                     if (methodArgsHasKeywords && i == 0) break;
-                    result.cat19(RubyObject.inspect(context, methodArgs[i]));
+                    result.catWithCodeRange(RubyObject.inspect(context, methodArgs[i]));
                     if (i < methodArgs.length - 1) {
                         result.catString(", ");
                     } else {
@@ -389,7 +387,7 @@ public class RubyEnumerator extends RubyObject implements java.util.Iterator<Obj
         }
     }
 
-    @JRubyMethod(required = 1)
+    @JRubyMethod
     public IRubyObject each_with_object(final ThreadContext context, IRubyObject arg, Block block) {
         return block.isGiven() ? RubyEnumerable.each_with_objectCommon(context, this, block, arg) :
                 enumeratorizeWithSize(context, this, "each_with_object", new IRubyObject[]{arg}, RubyEnumerator::size);

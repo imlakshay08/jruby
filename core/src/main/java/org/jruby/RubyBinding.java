@@ -105,8 +105,13 @@ public class RubyBinding extends RubyObject {
         
         return this;
     }
-    
-    @JRubyMethod(name = "initialize_copy", required = 1, visibility = Visibility.PRIVATE)
+
+    @JRubyMethod
+    public IRubyObject dup(ThreadContext context) {
+        return newBinding(context.runtime, binding.dup(context));
+    }
+
+    @JRubyMethod(name = "initialize_copy", visibility = Visibility.PRIVATE)
     @Override
     public IRubyObject initialize_copy(IRubyObject other) {
         RubyBinding otherBinding = (RubyBinding)other;
@@ -167,7 +172,7 @@ public class RubyBinding extends RubyObject {
 
     // MRI: check_local_id
     private String checkLocalId(ThreadContext context, IRubyObject obj) {
-        String id = RubySymbol.checkID(obj);
+        String id = RubySymbol.idStringFromObject(context, obj);
 
         if (!RubyLexer.isIdentifierChar(id.charAt(0))) {
             throw context.runtime.newNameError(str(context.runtime, "wrong local variable name `", obj, "' for ", this), id);

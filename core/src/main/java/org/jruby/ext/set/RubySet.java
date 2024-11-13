@@ -198,7 +198,7 @@ public class RubySet extends RubyObject implements Set {
     /**
      * initialize(enum = nil, &amp;block)
      */
-    @JRubyMethod(required = 1, visibility = Visibility.PRIVATE)
+    @JRubyMethod(visibility = Visibility.PRIVATE)
     public IRubyObject initialize(ThreadContext context, IRubyObject enume, Block block) {
         if ( enume.isNil() ) return initialize(context, block);
 
@@ -924,6 +924,13 @@ public class RubySet extends RubyObject implements Set {
     @Override
     @JRubyMethod
     public RubyFixnum hash() { // @hash.hash
+        RubyHash hash = this.hash;
+
+        if (hash == null) {
+            // Emulate set.rb for jruby/jruby#8393
+            return ((RubyBasicObject) getRuntime().getNil()).hash();
+        }
+
         return hash.hash();
     }
 
@@ -1215,7 +1222,7 @@ public class RubySet extends RubyObject implements Set {
             final RubyString s = inspect(context, elem);
             if ( notFirst ) str.cat((byte) ',').cat((byte) ' ');
             else str.setEncoding( s.getEncoding() ); notFirst = true;
-            str.cat19( s );
+            str.catWithCodeRange(s);
         }
 
         str.cat((byte) '}');

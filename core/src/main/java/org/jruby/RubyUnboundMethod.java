@@ -91,7 +91,7 @@ public class RubyUnboundMethod extends AbstractRubyMethod {
     }
 
     @Override
-    @JRubyMethod(name = "==", required = 1)
+    @JRubyMethod(name = "==")
     public RubyBoolean op_equal(ThreadContext context, IRubyObject other) {
         return RubyBoolean.newBoolean(context,  equals(other) );
     }
@@ -149,7 +149,9 @@ public class RubyUnboundMethod extends AbstractRubyMethod {
     @JRubyMethod(name = "clone")
     @Override
     public RubyUnboundMethod rbClone() {
-        return newUnboundMethod(implementationModule, methodName, originModule, originName, entry);
+        RubyUnboundMethod unboundMethod = newUnboundMethod(implementationModule, methodName, originModule, originName, entry);
+        if (isFrozen()) unboundMethod.setFrozen(true);
+        return unboundMethod;
     }
 
     @JRubyMethod(required =  1, rest = true, checkArity = false, keywords = true)

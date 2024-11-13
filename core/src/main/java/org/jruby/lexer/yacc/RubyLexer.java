@@ -162,6 +162,10 @@ public class RubyLexer extends LexingCommon {
         warnings.warning(id, file, line + 1, message); // rubysource-line is 0 based
     }
 
+    private void warn(ID id, String message) {
+        warnings.warn(id, getFile(), getRubySourceline(), message);
+    }
+
     public enum Keyword {
         END ("end", new ByteList(new byte[] {'e', 'n', 'd'}, USASCII_ENCODING), keyword_end, keyword_end, EXPR_END),
         ELSE ("else", new ByteList(new byte[] {'e', 'l', 's', 'e'}, USASCII_ENCODING), keyword_else, keyword_else, EXPR_BEG),
@@ -282,7 +286,7 @@ public class RubyLexer extends LexingCommon {
     private IRubyWarnings warnings;
 
     public Ruby getRuntime() {
-        return parser.getConfiguration().getRuntime();
+        return parser.getRuntime();
     }
 
     public int tokenize_ident(int result) {
@@ -354,7 +358,7 @@ public class RubyLexer extends LexingCommon {
                 c = '\n';
             } else if (ruby_sourceline > last_cr_line) {
                 last_cr_line = ruby_sourceline;
-                warning(ID.VOID_VALUE_EXPRESSION, "encountered \\r in middle of line, treated as a mere space");
+                warn(ID.VOID_VALUE_EXPRESSION, "encountered \\r in middle of line, treated as a mere space");
             }
         }
 
@@ -535,7 +539,7 @@ public class RubyLexer extends LexingCommon {
 
         // Enebo: This is a hash in MRI for multiple potential compile options but we currently only support one.
         // I am just going to set it and when a second is done we will reevaluate how they are populated.
-        parser.getConfiguration().setFrozenStringLiteral(b == 1);
+        parser.setFrozenStringLiteral(b == 1);
     }
 
     @Override
@@ -670,7 +674,7 @@ public class RubyLexer extends LexingCommon {
 
         StrNode newStr = new StrNode(ruby_sourceline, buffer, codeRange);
 
-        if (parser.getConfiguration().isFrozenStringLiteral()) newStr.setFrozen(true);
+        if (parser.isFrozenStringLiteral()) newStr.setFrozen(true);
 
         return newStr;
     }
@@ -1489,7 +1493,7 @@ public class RubyLexer extends LexingCommon {
             try {
                 ref = Integer.parseInt(refAsString.substring(1));
             } catch (NumberFormatException e) {
-                warning(ID.AMBIGUOUS_ARGUMENT, "`" + refAsString + "' is too big for a number variable, always nil");
+                warn(ID.AMBIGUOUS_ARGUMENT, "`" + refAsString + "' is too big for a number variable, always nil");
                 ref = 0;
             }
 
@@ -1531,7 +1535,7 @@ public class RubyLexer extends LexingCommon {
                 }
 
                 if (parenNest == 0 && isLookingAtEOL()) {
-                    warning(ID.MISCELLANEOUS, "... at EOL, should be parenthesized?");
+                    warn(ID.MISCELLANEOUS, "... at EOL, should be parenthesized?");
                 } else if (getLeftParenBegin() >= 0 && getLeftParenBegin() + 1 == parenNest) {
                     if (isLexState(last_state, EXPR_LABEL)) {
                         return tDOT3;

@@ -15,7 +15,6 @@ import org.jruby.RubyBoolean;
 import org.jruby.RubyClass;
 import org.jruby.RubyComplex;
 import org.jruby.RubyEncoding;
-import org.jruby.RubyException;
 import org.jruby.RubyFixnum;
 import org.jruby.RubyFloat;
 import org.jruby.RubyHash;
@@ -514,7 +513,9 @@ public class IRRuntimeHelpers {
                         new IRubyObject[] { value };
             case  0:
             case  1:
-                return new IRubyObject[] { value };
+                return signature.rest() == org.jruby.runtime.Signature.Rest.ANON ?
+                        IRBlockBody.toAry(context, value) :
+                        new IRubyObject[] { value };
         }
 
         return IRBlockBody.toAry(context, value);
@@ -527,7 +528,9 @@ public class IRRuntimeHelpers {
                 return array.toJavaArray();
             case 0:
             case 1:
-                return new IRubyObject[] { array };
+                return signature.rest() == org.jruby.runtime.Signature.Rest.ANON ?
+                        IRBlockBody.toAry(context, array) :
+                        new IRubyObject[] { array };
         }
 
         return singleBlockArgToArray(Helpers.aryToAry(context, array.size() == 1 ? array.eltInternal(0) : array));
@@ -635,6 +638,18 @@ public class IRRuntimeHelpers {
     }
 
     /**
+     * Check if the scope matches the configured ir.print.pattern, or if no pattern is set.
+     *
+     * @param scope the scope to match
+     * @return whether to print the scope
+     */
+    public static boolean shouldPrintScope(IRScope scope) {
+        String pattern = Options.IR_PRINT_PATTERN.load();
+
+        return pattern.equals(Options.IR_PRINT_PATTERN_NO_PATTERN_STRING) || scope.getId().matches(pattern);
+    }
+
+    /**
      * Update coverage data for the given file and zero-based line number.
      *
      * @param context
@@ -664,36 +679,6 @@ public class IRRuntimeHelpers {
         return  isEmpty ? context.tru : context.fals;
     }
 
-    /*
-     * If the callsite splats the argument list then we might manipulate the incoming arguments.
-     * For `foo(*args) at the sight:
-     *   - def foo(**kwargs) we eliminate ruby2_keywords hash with a dup'd value
-     *   - def foo(args) same
-     */
-    private static void callSiteFunging(ThreadContext context, IRubyObject[] args, RubyHash lastArg, int callInfo,
-                                        boolean hasRestArgs, boolean acceptsKeywords,
-                                        boolean ruby2_keywords_hash) {
-        if ((callInfo & CALL_SPLATS) == 0) return;
-
-        if (acceptsKeywords || !hasRestArgs) {
-            IRubyObject unmarked = maybeUnmarkLast(context, lastArg, ruby2_keywords_hash);
-
-            if (unmarked != null) args[args.length - 1] = unmarked;
-        }
-    }
-
-    private static IRubyObject maybeUnmarkLast(ThreadContext context, RubyHash last, boolean ruby2_keywords_hash) {
-        if (ruby2_keywords_hash && !last.isEmpty()) {
-            RubyHash newHash = last.dupFast(context);
-
-            newHash.setRuby2KeywordHash(false);
-
-            return newHash;
-        }
-
-        return null;
-    }
-
     public static IRubyObject undefined() {
         return UNDEFINED;
     }
@@ -701,68 +686,141 @@ public class IRRuntimeHelpers {
     // specific arity methods in JIT will only be fixed arity meaning no kwargs and no rest args.
     // this logic is the same as recieveKeywords but we know it will never be a keyword argument (jit
     // will save %undefined as the keyword value).
-    @JIT // Only used for specificArity JITted methods with at least one parameter
-    public static IRubyObject receiveSpecificArityKeywords(ThreadContext context, StaticScope staticScope, IRubyObject last) {
-        IRScope scope = staticScope.getIRScope();
-        int callInfo = context.resetCallInfo();
+    // Due to jruby/jruby#8119 and the potential for ruby2_keywords flags to change after JIT, jitted code will always
+    // call on this path and pass in the live value of ruby2_keywords from the scope.
+    @JIT
+    public static IRubyObject receiveSpecificArityKeywords(ThreadContext context, IRubyObject last, boolean ruby2Keywords) {
+        if (!(last instanceof RubyHash)) {
+            ThreadContext.clearCallInfo(context);
+            return last;
+        }
 
-        /*
-        if ((callInfo & CALL_KEYWORD_EMPTY) != 0) {
-            System.out.println("HERE.2a");
-            return UNDEFINED;
-        }*/
+        return ruby2Keywords ?
+                receiveSpecificArityRuby2HashKeywords(context, last) :
+                receiveSpecificArityHashKeywords(context, last);
+    }
 
-        if (!(last instanceof RubyHash)) return last;
+    private static IRubyObject receiveSpecificArityHashKeywords(ThreadContext context, IRubyObject last) {
+        int callInfo = ThreadContext.resetCallInfo(context);
+        boolean isKwarg = (callInfo & CALL_KEYWORD) != 0;
 
-        RubyHash hash = (RubyHash) last;
+        return receiverSpecificArityKwargsCommon(context, last, callInfo, isKwarg);
+    }
 
+    private static IRubyObject receiveSpecificArityRuby2HashKeywords(ThreadContext context, IRubyObject last) {
+        int callInfo = ThreadContext.resetCallInfo(context);
         boolean isKwarg = (callInfo & CALL_KEYWORD) != 0;
 
         // ruby2_keywords only get unmarked if it enters a method which accepts keywords.
         // This means methods which don't just keep that marked hash around in case it is passed
         // onto another method which accepts keywords.
-        if (scope.isRuby2Keywords() && isKwarg) {
+        if (isKwarg) {
             // a ruby2_keywords method which happens to receive a keyword.  Mark hash as ruby2_keyword
             // So it can be used similarly to an ordinary hash passed in this way.
 
+            RubyHash hash = (RubyHash) last;
             hash = hash.dupFast(context);
             hash.setRuby2KeywordHash(true);
 
             return hash;
-        } else if ((callInfo & CALL_KEYWORD_REST) != 0) {
+        }
+
+        return receiverSpecificArityKwargsCommon(context, last, callInfo, isKwarg);
+    }
+
+    private static IRubyObject receiverSpecificArityKwargsCommon(ThreadContext context, IRubyObject last, int callInfo, boolean isKwarg) {
+        // ruby2_keywords only get unmarked if it enters a method which accepts keywords.
+        // This means methods which don't just keep that marked hash around in case it is passed
+        // onto another method which accepts keywords.
+        if ((callInfo & CALL_KEYWORD_REST) != 0) {
             // This is kwrest passed to a method which does not accept kwargs
 
             // We pass empty kwrest through so kwrest does not try and slurp it up as normal argument.
             // This complicates check_arity but empty ** is special case.
+            RubyHash hash = (RubyHash) last;
             return hash;
         } else if (!isKwarg) {
             // This is just an ordinary hash as last argument
             return last;
         } else {
+            RubyHash hash = (RubyHash) last;
             return hash.dupFast(context);
         }
     }
 
+    /**
+     * Simplified receiveKeywords when:
+     * <li>receiver is not a ruby2_keywords method</li>
+     * <li>receiver does not accept keywords</li>
+     * <li>there's no rest argument</li>
+     *
+     * @param context
+     * @param args
+     * @return the prepared kwargs hash, or UNDEFINED as a sigil for no kwargs
+     */
     @JIT
-    public static IRubyObject receiveKeywords(ThreadContext context, StaticScope staticScope, IRubyObject[] args, boolean hasRestArgs, boolean acceptKeywords) {
-        return receiveKeywords(context, args, hasRestArgs, acceptKeywords, staticScope.getIRScope().isRuby2Keywords());
+    public static IRubyObject receiveNormalKeywordsNoRestNoKeywords(ThreadContext context, IRubyObject[] args) {
+        int callInfo = ThreadContext.resetCallInfo(context);
+        if (shouldHandleKwargs(args, callInfo) && (callInfo & CALL_SPLATS) != 0) {
+            return receiveKeywordsWithSplatsNoRestNoKeywords(context, args);
+        }
+
+        return UNDEFINED;
     }
 
-    // We return as undefined and not null when no kwarg since null gets auto-converted to nil because
-    // temp vars do this to work around no explicit initialization of temp values (e.g. they might start as null).
+    /**
+     * Handle incoming keyword arguments given the receiver's rest arg, keyword acceptance, and need for ruby2_keywords.
+     *
+     * We return as undefined and not null when no kwarg since null gets auto-converted to nil because
+     * temp vars do this to work around no explicit initialization of temp values (e.g. they might start as null).
+     *
+     * @param context
+     * @param args
+     * @param hasRestArgs
+     * @param acceptsKeywords
+     * @param ruby2_keywords_method
+     * @return
+     */
     @Interp
     public static IRubyObject receiveKeywords(ThreadContext context, IRubyObject[] args, boolean hasRestArgs,
                                               boolean acceptsKeywords, boolean ruby2_keywords_method) {
-        int callInfo = context.resetCallInfo();
+        int callInfo = ThreadContext.resetCallInfo(context);
+        if (shouldHandleKwargs(args, callInfo)) {
+            return receiveKeywordsHash(context, args, hasRestArgs, acceptsKeywords, ruby2_keywords_method, callInfo);
+        }
 
-        if ((callInfo & CALL_KEYWORD_EMPTY) != 0) return UNDEFINED;
-        if (args.length < 1) return UNDEFINED;
+        return UNDEFINED;
+    }
 
-        IRubyObject last = args[args.length - 1];
+    private static IRubyObject receiveKeywordsWithSplatsNoRestNoKeywords(ThreadContext context, IRubyObject[] args) {
+        RubyHash hash = (RubyHash) args[args.length - 1];
 
-        if (!(last instanceof RubyHash)) return UNDEFINED;
+        if (hash.isRuby2KeywordHash()) {
+            if (hash.isEmpty()) {
+                // case where we somehow (hash.clear) a marked ruby2_keyword.  We pass it as keyword even in non-keyword
+                // accepting methods so it is subtracted from the arity count.  Normally empty keyword arguments are not
+                // passed along but ruby2_keyword is a strange case since it is mutable by users.
+                return hash;
+            }
 
-        RubyHash hash = (RubyHash) last;
+            clearTrailingHashRuby2Keywords(context, args, hash);
+        }
+
+        return UNDEFINED;
+    }
+
+    private static void clearTrailingHashRuby2Keywords(ThreadContext context, IRubyObject[] args, RubyHash hash) {
+        RubyHash newHash = hash.dupFast(context);
+        newHash.setRuby2KeywordHash(false);
+        args[args.length - 1] = newHash;
+    }
+
+    private static boolean shouldHandleKwargs(IRubyObject[] args, int callInfo) {
+        return (callInfo & CALL_KEYWORD_EMPTY) == 0 && args.length >= 1 && args[args.length - 1] instanceof RubyHash;
+    }
+
+    private static IRubyObject receiveKeywordsHash(ThreadContext context, IRubyObject[] args, boolean hasRestArgs, boolean acceptsKeywords, boolean ruby2_keywords_method, int callInfo) {
+        RubyHash hash = (RubyHash) args[args.length - 1];
 
         // We record before funging last arg because we may unmark and replace last arg.
         boolean ruby2_keywords_hash = hash.isRuby2KeywordHash();
@@ -770,44 +828,50 @@ public class IRRuntimeHelpers {
         // ruby2_keywords only get unmarked if it enters a method which accepts keywords.
         // This means methods which don't just keep that marked hash around in case it is passed
         // onto another method which accepts keywords.
-        if (ruby2_keywords_hash) {
-            if (acceptsKeywords) {
-                if (!hash.isEmpty()) hash = hash.dupFast(context);
-                if (!ruby2_keywords_method) hash.setRuby2KeywordHash(false);
+        if (ruby2_keywords_hash && acceptsKeywords) {
+            if (!hash.isEmpty()) hash = hash.dupFast(context);
+            if (!ruby2_keywords_method) hash.setRuby2KeywordHash(false);
+            return hash;
+        }
 
+        boolean callSplats = (callInfo & CALL_SPLATS) != 0;
+        boolean callSplatsWithRuby2KeywordsHash = callSplats && ruby2_keywords_hash;
+
+        // if we're splatting a ruby2_keywords hash
+        //    AND the hash is non-empty
+        //    AND keywords are accepted OR there's no rest args,
+        // clear the ruby2_keywords flag from the hash
+        if (callSplatsWithRuby2KeywordsHash
+                && !hash.isEmpty()
+                && (acceptsKeywords || !hasRestArgs)) {
+            clearTrailingHashRuby2Keywords(context, args, hash);
+        }
+
+        boolean callKeyword = (callInfo & CALL_KEYWORD) != 0;
+
+        // If method wants ruby2 keywords and call has keywords, convert to ruby2_keywords hash
+        if (ruby2_keywords_method && callKeyword) {
+            setTrailingHashRuby2Keywords(context, args, hash);
+        } else {
+            // If splat call with ruby2_keywords hash that's not empty, just return it
+            if (callSplatsWithRuby2KeywordsHash && hash.isEmpty()) {
                 return hash;
+            }
+
+            // If ordinary hash as last argument, dup and return it
+            if (callKeyword && acceptsKeywords && !hash.isEmpty()) {
+                return hash.dupFast(context);
             }
         }
 
-        callSiteFunging(context, args, hash, callInfo, hasRestArgs, acceptsKeywords, ruby2_keywords_hash);
+        // All other situations no-op
+        return UNDEFINED;
+    }
 
-
-        if (ruby2_keywords_method && (callInfo & CALL_KEYWORD) != 0) {
-            // a ruby2_keywords method which happens to receive a keyword.  Mark hash as ruby2_keyword
-            // So it can be used similarly to an ordinary hash passed in this way.
-            hash = hash.dupFast(context);
-            hash.setRuby2KeywordHash(true);
-
-            args[args.length - 1] = hash;
-            return UNDEFINED;
-        } else if ((callInfo & CALL_SPLATS) != 0 && ruby2_keywords_hash && hash.isEmpty()) {
-            // case where we somehow (hash.clear) a marked ruby2_keyword.  We pass it as keyword even in non-keyword
-            // accepting methods so it is subtracted from the arity count.  Normally empty keyword arguments are not
-            // passed along but ruby2_keyword is a strange case since it is mutable by users.
-            return hash;
-        } else if (!acceptsKeywords && (callInfo & CALL_KEYWORD_REST) != 0) {
-            // This is kwrest passed to a method which does not accept kwargs
-
-            // We pass empty kwrest through so kwrest does not try and slurp it up as normal argument.
-            // This complicates check_arity but empty ** is special case.
-            return UNDEFINED;
-        } else if ((callInfo & CALL_KEYWORD) == 0) {
-            // This is just an ordinary hash as last argument
-            return UNDEFINED;
-        } else {
-            // This last check needs explaining.  We never pass empty kwargs hashes so this means it is really a normal argument.
-            return !acceptsKeywords || hash.isEmpty() ? UNDEFINED : hash.dupFast(context);
-        }
+    private static void setTrailingHashRuby2Keywords(ThreadContext context, IRubyObject[] args, RubyHash hash) {
+        hash = hash.dupFast(context);
+        hash.setRuby2KeywordHash(true);
+        args[args.length - 1] = hash;
     }
 
     /**
@@ -831,17 +895,6 @@ public class IRRuntimeHelpers {
         context.callInfo = (context.callInfo & CALL_KEYWORD_EMPTY) | flags;
     }
 
-    // specific args of arity 0 does not receive kwargs so we have to reset this.
-    @JIT
-    public static void resetCallInfo(ThreadContext context) {
-        context.resetCallInfo();
-    }
-
-    @JIT
-    public static void clearCallInfo(ThreadContext context) {
-        context.clearCallInfo();
-    }
-
     public static void checkForExtraUnwantedKeywordArgs(ThreadContext context, final StaticScope scope, RubyHash keywordArgs) {
         // we do an inexpensive non-gathering scan first to see if there's a bad keyword
         try {
@@ -858,7 +911,7 @@ public class IRRuntimeHelpers {
     public static DynamicScope prepareScriptScope(ThreadContext context, StaticScope scope) {
         IRScope irScope = scope.getIRScope();
 
-        if (irScope != null && irScope.isScriptScope()) {
+        if (irScope != null && irScope.isScriptScope() && !irScope.hasFlipFlops()) {
             DynamicScope tlbScope = ((IRScriptBody) irScope).getScriptDynamicScope();
             if (tlbScope != null) {
                 context.preScopedBody(tlbScope);
@@ -1959,7 +2012,7 @@ public class IRRuntimeHelpers {
     @JIT
     public static RubyArray irSplat(ThreadContext context, IRubyObject ary) {
         Ruby runtime = context.runtime;
-        int callInfo = context.resetCallInfo();
+        int callInfo = ThreadContext.resetCallInfo(context);
         IRubyObject tmp = TypeConverter.convertToTypeWithCheck(context, ary, runtime.getArray(), sites(context).to_a_checked);
         if (tmp.isNil()) {
             tmp = runtime.newArray(ary);
@@ -2486,21 +2539,23 @@ public class IRRuntimeHelpers {
     }
 
     @Interp
-    public static void putConst(ThreadContext context, IRubyObject self, RubyModule module, String id, IRubyObject value) {
+    public static void putConst(ThreadContext context, IRubyObject self, IRubyObject module, String id, IRubyObject value) {
         putConst(context, self, module, id, value, context.getFile(), context.getLine() + 1);
     }
 
     @JIT
-    public static void putConst(ThreadContext context, IRubyObject self, RubyModule module, String id, IRubyObject value, StaticScope scope, int line) {
-        warnSetConstInRefinement(context, self);
-
-        module.setConstant(id, value, scope.getFile(), line);
+    public static void putConst(ThreadContext context, IRubyObject self, IRubyObject module, String id, IRubyObject value, StaticScope scope, int line) {
+        putConst(context, self, module, id, value, scope.getFile(), line);
     }
 
-    private static void putConst(ThreadContext context, IRubyObject self, RubyModule module, String id, IRubyObject value, String filename, int line) {
+    private static void putConst(ThreadContext context, IRubyObject self, IRubyObject module, String id, IRubyObject value, String filename, int line) {
+        if (!(module instanceof RubyModule)) {
+            throw context.getRuntime().newTypeError("" + module.inspect() + " is not a class/module");
+        }
+
         warnSetConstInRefinement(context, self);
 
-        module.setConstant(id, value, filename, line);
+        ((RubyModule) module).setConstant(id, value, filename, line);
     }
 
     @Interp @JIT
@@ -2548,6 +2603,11 @@ public class IRRuntimeHelpers {
     @JIT
     public static RubyClass getObject(ThreadContext context) {
         return context.runtime.getObject();
+    }
+
+    @JIT
+    public static RubyClass getSymbol(ThreadContext context) {
+        return context.runtime.getSymbol();
     }
 
     @JIT @Interp

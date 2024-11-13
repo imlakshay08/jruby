@@ -82,10 +82,18 @@ public class Signature {
     public int keyRest() { return keyRest; }
 
     /**
+     * Total number of keyword argument parameters.
+     * @return the number of kwarg parameters
+     */
+    public int kwargs() {
+        return kwargs;
+    }
+
+    /**
      * Are there an exact (fixed) number of parameters to this signature?
      */
     public boolean isFixed() {
-        return arityValue() >= 0;
+        return arityValue() >= 0 && rest != Rest.ANON;
     }
 
     /**
@@ -135,8 +143,9 @@ public class Signature {
         int oneForKeywords = requiredKwargs > 0 ? 1 : 0;
         int fixedValue = pre() + post() + oneForKeywords;
         boolean hasOptionalKeywords = kwargs - requiredKwargs > 0;
+        boolean optionalFromRest = rest() != Rest.NONE && rest != Rest.ANON;
 
-        if (opt() > 0 || rest() != Rest.NONE || (hasOptionalKeywords || restKwargs()) && oneForKeywords == 0) {
+        if (opt() > 0 || optionalFromRest || (hasOptionalKeywords || restKwargs()) && oneForKeywords == 0) {
             return -1 * (fixedValue + 1);
         }
 
@@ -153,7 +162,7 @@ public class Signature {
      * @return true if the signature expects multiple args
      */
     public boolean isSpreadable() {
-        return arityValue < -1 || arityValue > 1 || (opt > 0 && !restKwargs());
+        return arityValue < -1 || arityValue > 1 || (opt > 0 && !restKwargs()) || rest == Rest.ANON;
     }
 
 

@@ -198,7 +198,7 @@ public class JVMVisitor extends IRVisitor {
         BasicBlock[] bbs = scope.prepareForCompilation();
         FullInterpreterContext fullIC = scope.getFullInterpreterContext();
 
-        if (print && IRRuntimeHelpers.shouldPrintIR(runtime)) {
+        if (print && IRRuntimeHelpers.shouldPrintIR(runtime) && IRRuntimeHelpers.shouldPrintScope(scope)) {
             ByteArrayOutputStream baos = IRDumper.printIR(scope, true);
 
             LOG.info("Printing JIT IR for " + scope.getId() + ":\n" + new String(baos.toByteArray()));
@@ -1179,7 +1179,7 @@ public class JVMVisitor extends IRVisitor {
                 // we have bytelist and CR in hand, go straight to cat logic
                 FrozenString str = (FrozenString) p;
                 jvmMethod().getValueCompiler().pushFrozenString(str.getByteList(), str.getCodeRange(), str.getFile(), str.getLine());
-                jvmAdapter().invokevirtual(p(RubyString.class), "cat19", sig(RubyString.class, RubyString.class));
+                jvmAdapter().invokevirtual(p(RubyString.class), "catWithCodeRange", sig(RubyString.class, RubyString.class));
             } else if (p instanceof StringLiteral) {
                 StringLiteral str = (StringLiteral) p;
                 jvmMethod().getValueCompiler().pushByteList(str.getByteList());
@@ -1191,14 +1191,7 @@ public class JVMVisitor extends IRVisitor {
             }
         }
         if (compoundstring.isFrozen()) {
-            if (runtime.getInstanceConfig().isDebuggingFrozenStringLiteral()) {
-                jvmMethod().loadContext();
-                jvmAdapter().ldc(compoundstring.getFile());
-                jvmAdapter().ldc(compoundstring.getLine());
-                jvmMethod().invokeIRHelper("freezeLiteralString", sig(RubyString.class, RubyString.class, ThreadContext.class, String.class, int.class));
-            } else {
-                jvmMethod().invokeIRHelper("freezeLiteralString", sig(RubyString.class, RubyString.class));
-            }
+            jvmMethod().invokeIRHelper("freezeLiteralString", sig(RubyString.class, RubyString.class));
         }
         jvmStoreLocal(compoundstring.getResult());
     }
@@ -1597,7 +1590,7 @@ public class JVMVisitor extends IRVisitor {
     private boolean canOmitStoreLoad(EQQInstr eqq, Instr nextInstr) {
         assert nextInstr != null: "Somehow EQQ is the last instr in the scope...";
 
-        return nextInstr instanceof BTrueInstr && eqq.getResult().equals(((BTrueInstr) nextInstr).getArg1());
+        return !eqq.isPattern() && nextInstr instanceof BTrueInstr && eqq.getResult().equals(((BTrueInstr) nextInstr).getArg1());
     }
 
     @Override
@@ -1947,8 +1940,9 @@ public class JVMVisitor extends IRVisitor {
         jvmMethod().loadContext();
         jvmMethod().loadSelfBlock();
         jvmMethod().loadArgs();
-        jvmAdapter().ldc(((IRClosure)jvm.methodData().scope).receivesKeywordArgs());
-        jvmAdapter().ldc(((IRClosure)jvm.methodData().scope).isRuby2Keywords());
+        jvmAdapter().ldc(jvm.methodData().scope.receivesKeywordArgs());
+        jvmMethod().loadStaticScope();
+        jvmAdapter().invokevirtual(p(StaticScope.class), "isRuby2Keywords", sig(boolean.class));
         jvmMethod().invokeIRHelper("prepareBlockArgs", sig(IRubyObject[].class, ThreadContext.class, Block.class, IRubyObject[].class, boolean.class, boolean.class));
         jvmMethod().storeArgs();
     }
@@ -1991,21 +1985,13 @@ public class JVMVisitor extends IRVisitor {
     @Override
     public void PushBlockBindingInstr(PushBlockBindingInstr instr) {
         IRScope scope = jvm.methodData().scope;
-
-        // FIXME: Centralize this out of InterpreterContext
         FullInterpreterContext fullIC = scope.getExecutionContext();
-        boolean reuseParentDynScope = fullIC.reuseParentDynScope();
-        boolean pushNewDynScope = !fullIC.isDynamicScopeEliminated() && !reuseParentDynScope;
 
-        if (pushNewDynScope) {
-            if (reuseParentDynScope) {
-                throw new NotCompilableException("BUG: both create new scope and reuse parent scope specified");
-            } else {
-                jvmMethod().loadContext();
-                jvmMethod().loadSelfBlock();
-                jvmMethod().invokeIRHelper("pushBlockDynamicScopeNew", sig(DynamicScope.class, ThreadContext.class, Block.class));
-            }
-        } else if (reuseParentDynScope) {
+        if (fullIC.pushNewDynScope()) {
+            jvmMethod().loadContext();
+            jvmMethod().loadSelfBlock();
+            jvmMethod().invokeIRHelper("pushBlockDynamicScopeNew", sig(DynamicScope.class, ThreadContext.class, Block.class));
+        } else if (fullIC.reuseParentDynScope()) {
             jvmMethod().loadContext();
             jvmMethod().loadSelfBlock();
             jvmMethod().invokeIRHelper("pushBlockDynamicScopeReuse", sig(DynamicScope.class, ThreadContext.class, Block.class));
@@ -2099,12 +2085,11 @@ public class JVMVisitor extends IRVisitor {
         m.loadContext();
         m.loadSelf();
         visit(putconstinstr.getTarget());
-        m.adapter.checkcast(p(RubyModule.class));
         m.adapter.ldc(putconstinstr.getId());
         visit(putconstinstr.getValue());
         jvmMethod().loadStaticScope();
         m.adapter.pushInt(m.getLastLine());
-        m.invokeIRHelper("putConst", sig(void.class, ThreadContext.class, IRubyObject.class, RubyModule.class, String.class, IRubyObject.class, StaticScope.class, int.class));
+        m.invokeIRHelper("putConst", sig(void.class, ThreadContext.class, IRubyObject.class, IRubyObject.class, String.class, IRubyObject.class, StaticScope.class, int.class));
     }
 
     @Override
@@ -2151,25 +2136,29 @@ public class JVMVisitor extends IRVisitor {
     @Override
     public void ReceiveKeywordsInstr(ReceiveKeywordsInstr instr) {
         int argsLength = jvm.methodData().specificArity;
+
         if (argsLength >= 0) {
             if (argsLength > 0) {
                 jvmMethod().loadContext();
-                jvmMethod().loadStaticScope();
                 jvmAdapter().aload(3 + argsLength - 1); // 3 - 0-2 are not args // FIXME: This should get abstracted
-                jvmMethod().invokeIRHelper("receiveSpecificArityKeywords", sig(IRubyObject.class, ThreadContext.class, StaticScope.class, IRubyObject.class));
+                jvmMethod().loadStaticScope();
+                jvmAdapter().invokevirtual(p(StaticScope.class), "isRuby2Keywords", sig(boolean.class));
+                jvmMethod().invokeIRHelper("receiveSpecificArityKeywords",
+                        sig(IRubyObject.class, ThreadContext.class, IRubyObject.class, boolean.class));
                 jvmAdapter().astore(3 + argsLength - 1); // 3 - 0-2 are not args // FIXME: This should get abstracted
             } else {
                 jvmMethod().loadContext();
-                jvmMethod().invokeIRHelper("resetCallInfo", sig(void.class, ThreadContext.class));
+                jvmMethod().adapter.invokestatic(p(ThreadContext.class), "clearCallInfo", sig(void.class, ThreadContext.class));
             }
             jvmMethod().invokeIRHelper("undefined", sig(IRubyObject.class));
         } else {
             jvmMethod().loadContext();
-            jvmMethod().loadStaticScope();
             jvmMethod().loadArgs();
             jvmAdapter().ldc(instr.hasRestArg());
             jvmAdapter().ldc(instr.acceptsKeywords());
-            jvmMethod().invokeIRHelper("receiveKeywords", sig(IRubyObject.class, ThreadContext.class, StaticScope.class, IRubyObject[].class, boolean.class, boolean.class));
+            jvmMethod().loadStaticScope();
+            jvmAdapter().invokevirtual(p(StaticScope.class), "isRuby2Keywords", sig(boolean.class));
+            jvmMethod().invokeIRHelper("receiveKeywords", sig(IRubyObject.class, ThreadContext.class, IRubyObject[].class, boolean.class, boolean.class, boolean.class));
         }
         jvmStoreLocal(instr.getResult());
     }
@@ -2850,6 +2839,9 @@ public class JVMVisitor extends IRVisitor {
                 return;
             case OBJECT:
                 jvmMethod().getValueCompiler().pushObjectClass();
+                return;
+            case SYMBOL:
+                jvmMethod().getValueCompiler().pushSymbolClass();
                 return;
             default:
                 throw new RuntimeException("BuiltinClass has unknown type");

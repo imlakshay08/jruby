@@ -40,7 +40,6 @@ import org.jruby.RubyString;
 import org.jruby.RubySymbol;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.ast.util.ArgsUtil;
-import org.jruby.runtime.Arity;
 import org.jruby.runtime.JavaSites;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.backtrace.RubyStackTraceElement;
@@ -48,7 +47,6 @@ import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.TypeConverter;
 import org.jruby.util.func.TriFunction;
 
-import static org.jruby.util.RubyStringBuilder.cat;
 import static org.jruby.util.RubyStringBuilder.str;
 
 /**
@@ -155,7 +153,7 @@ public class RubyWarnings implements IRubyWarnings, WarnCallback {
 
         RubySymbol cat = (RubySymbol) TypeConverter.convertToType(category, runtime.getSymbol(), "to_sym");
 
-        if (runtime.getWarningCategories().contains(Category.fromId(cat.idString()))) warn(context, null, errorString);
+        if (runtime.getWarningCategories().contains(Category.fromId(cat.idString()))) warn(context, context.runtime.getKernel(), errorString);
 
         return context.nil;
     }
@@ -191,6 +189,10 @@ public class RubyWarnings implements IRubyWarnings, WarnCallback {
         if (runtime.getWarningCategories().contains(Category.DEPRECATED)) warn(id, message);
     }
 
+    public void warnDeprecated(String message) {
+        if (runtime.getWarningCategories().contains(Category.DEPRECATED)) warn(message);
+    }
+
     public void warnDeprecatedAlternate(String name, String alternate) {
         if (runtime.getWarningCategories().contains(Category.DEPRECATED)) warn(ID.DEPRECATED_METHOD, name + " is deprecated; use " + alternate + " instead");
     }
@@ -208,15 +210,27 @@ public class RubyWarnings implements IRubyWarnings, WarnCallback {
     }
 
     /**
-     * Verbose mode warning methods, their contract is that consumer must explicitly check for runtime.isVerbose() before calling them
+     * Verbose mode warning methods, only warn in verbose mode
      */
     public void warning(String message) {
         warning(ID.MISCELLANEOUS, message);
     }
 
+    public void warningDeprecated(String message) {
+        warningDeprecated(ID.MISCELLANEOUS, message);
+    }
+
     @Override
     public void warning(ID id, String message) {
+        if (!isVerbose()) return;
+
         warn(id, message);
+    }
+
+    public void warningDeprecated(ID id, String message) {
+        if (!isVerbose()) return;
+
+        warnDeprecated(id, message);
     }
 
     /**
@@ -224,10 +238,14 @@ public class RubyWarnings implements IRubyWarnings, WarnCallback {
      */
     @Override
     public void warning(ID id, String fileName, int lineNumber, String message) {
+        if (!isVerbose()) return;
+
         warn(id, fileName, lineNumber, message);
     }
 
     public void warning(String fileName, int lineNumber, String message) {
+        if (!isVerbose()) return;
+
         warn(fileName, lineNumber, message);
     }
 
@@ -264,10 +282,21 @@ public class RubyWarnings implements IRubyWarnings, WarnCallback {
         return flag;
     }
 
-    // This used to be jrubymethod but leave recv behind for backwards compat
+    @JRubyMethod
     public static IRubyObject warn(ThreadContext context, IRubyObject recv, IRubyObject arg) {
         TypeConverter.checkType(context, arg, context.runtime.getString());
         return warn(context, (RubyString) arg);
+    }
+
+    @JRubyMethod
+    public static IRubyObject warn(ThreadContext context, IRubyObject recv, IRubyObject arg0, IRubyObject arg1) {
+        IRubyObject opts = TypeConverter.checkHashType(context.runtime, arg1);
+        IRubyObject ret = ArgsUtil.extractKeywordArg(context, (RubyHash) opts, "category");
+        if (ret.isNil()) {
+            return warn(context, recv, arg0);
+        } else {
+            return warnWithCategory(context, arg0, ret);
+        }
     }
 
     public static IRubyObject warn(ThreadContext context, RubyString str) {
@@ -276,36 +305,8 @@ public class RubyWarnings implements IRubyWarnings, WarnCallback {
         return context.nil;
     }
 
-    @JRubyMethod(required = 1, optional = 1, checkArity = false)
-    public static IRubyObject warn(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
-        int argc = Arity.checkArgumentCount(context, args, 1, 2);
-
-        if (argc > 1) {
-            IRubyObject opts = TypeConverter.checkHashType(context.runtime, args[1]);
-            IRubyObject ret = ArgsUtil.extractKeywordArg(context, (RubyHash) opts, "category");
-            if (ret.isNil()) {
-                return warn(context, recv, args[0]);
-            } else {
-                return warnWithCategory(context, args[0], ret);
-            }
-        } else {
-            return warn(context, recv, args[0]);
-        }
-    }
-
     private static JavaSites.WarningSites sites(ThreadContext context) {
         return context.sites.Warning;
-    }
-
-    /**
-     * Prints a warning, unless $VERBOSE is nil.
-     */
-    @Override
-    @Deprecated
-    public void warn(ID id, String fileName, String message) {
-        if (!runtime.warningsEnabled()) return;
-
-        warn(runtime.getCurrentContext(), runtime.newString(fileName + " warning: " + message + '\n'));
     }
 
     public enum Category {
@@ -324,6 +325,29 @@ public class RubyWarnings implements IRubyWarnings, WarnCallback {
             }
 
             return null;
+        }
+    }
+
+    /**
+     * Prints a warning, unless $VERBOSE is nil.
+     */
+    @Override
+    @Deprecated
+    public void warn(ID id, String fileName, String message) {
+        if (!runtime.warningsEnabled()) return;
+
+        warn(runtime.getCurrentContext(), runtime.newString(fileName + " warning: " + message + '\n'));
+    }
+
+    @Deprecated
+    public static IRubyObject warn(ThreadContext context, IRubyObject recv, IRubyObject[] args) {
+        switch (args.length) {
+            case 1:
+                return warn(context, recv, args[0]);
+            case 2:
+                return warn(context, recv, args[0], args[1]);
+            default:
+                throw context.runtime.newArgumentError(args.length, 1, 2);
         }
     }
 }

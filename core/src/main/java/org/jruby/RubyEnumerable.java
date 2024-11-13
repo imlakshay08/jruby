@@ -163,7 +163,7 @@ public class RubyEnumerable {
         final Ruby runtime = context.runtime;
         final SingleInt result = new SingleInt();
 
-        if (block.isGiven()) runtime.getWarnings().warning(ID.BLOCK_UNUSED , "given block not used");
+        if (block.isGiven()) runtime.getWarnings().warn(ID.BLOCK_UNUSED , "given block not used");
 
         each(context, eachSite(context), self, new JavaInternalBlockBody(runtime, context, "Enumerable#count", Signature.ONE_REQUIRED) {
             public IRubyObject yield(ThreadContext context1, IRubyObject[] args) {
@@ -690,7 +690,7 @@ public class RubyEnumerable {
     public static IRubyObject find_index(ThreadContext context, IRubyObject self, final IRubyObject cond, final Block block) {
         final Ruby runtime = context.runtime;
 
-        if (block.isGiven()) runtime.getWarnings().warning(ID.BLOCK_UNUSED , "given block not used");
+        if (block.isGiven()) runtime.getWarnings().warn(ID.BLOCK_UNUSED , "given block not used");
         if (self instanceof RubyArray) return ((RubyArray) self).find_index(context, cond);
 
         return find_indexCommon(context, eachSite(context), self, cond);
@@ -1074,6 +1074,8 @@ public class RubyEnumerable {
 
     @JRubyMethod(name = {"inject", "reduce"})
     public static IRubyObject inject(ThreadContext context, IRubyObject self, final Block block) {
+        if (!block.isGiven()) throw context.runtime.newArgumentError("wrong number of arguments (given 0, expected 1..2)");
+
         return injectCommon(context, self, null, block);
     }
 
@@ -1086,7 +1088,7 @@ public class RubyEnumerable {
     public static IRubyObject inject(ThreadContext context, IRubyObject self, IRubyObject init, IRubyObject method, final Block block) {
         final Ruby runtime = context.runtime;
 
-        if (block.isGiven()) runtime.getWarnings().warning(ID.BLOCK_UNUSED , "given block not used");
+        if (block.isGiven()) runtime.getWarnings().warn(ID.BLOCK_UNUSED , "given block not used");
 
         final String methodId = method.asJavaString();
         final SingleObject<IRubyObject> result = new SingleObject<>(init);
@@ -1212,7 +1214,7 @@ public class RubyEnumerable {
         return block.isGiven() ? each_with_indexCommon(context, self, block, args) : enumeratorizeWithSize(context, self, "each_with_index", args, (SizeFn) RubyEnumerable::size);
     }
 
-    @JRubyMethod(required = 1)
+    @JRubyMethod
     public static IRubyObject each_with_object(ThreadContext context, IRubyObject self, IRubyObject arg, Block block) {
         return block.isGiven() ? each_with_objectCommon(context, self, block, arg) : enumeratorizeWithSize(context, self, "each_with_object", new IRubyObject[] { arg }, RubyEnumerable::size);
     }
@@ -1359,7 +1361,7 @@ public class RubyEnumerable {
         return self;
     }
 
-    @JRubyMethod(name = {"include?", "member?"}, required = 1)
+    @JRubyMethod(name = {"include?", "member?"})
     public static IRubyObject include_p(final ThreadContext context, IRubyObject self, final IRubyObject arg) {
         try {
             callEach(context, eachSite(context), self, Signature.OPTIONAL, new BlockCallback() {
@@ -1591,7 +1593,7 @@ public class RubyEnumerable {
         final boolean patternGiven = pattern != null;
 
         if (block.isGiven() && patternGiven) {
-            context.runtime.getWarnings().warning(ID.BLOCK_UNUSED, "given block not used");
+            context.runtime.getWarnings().warn(ID.BLOCK_UNUSED, "given block not used");
         }
 
         try {
@@ -1646,7 +1648,7 @@ public class RubyEnumerable {
         final boolean patternGiven = pattern != null;
 
         if (block.isGiven() && patternGiven) {
-            context.runtime.getWarnings().warning(ID.BLOCK_UNUSED, "given block not used");
+            context.runtime.getWarnings().warn(ID.BLOCK_UNUSED, "given block not used");
         }
 
         try {
@@ -1729,7 +1731,7 @@ public class RubyEnumerable {
         final boolean patternGiven = pattern != null;
 
         if (block.isGiven() && patternGiven) {
-            localContext.runtime.getWarnings().warning(ID.BLOCK_UNUSED, "given block not used");
+            localContext.runtime.getWarnings().warn(ID.BLOCK_UNUSED, "given block not used");
         }
 
         try {
@@ -1819,7 +1821,7 @@ public class RubyEnumerable {
         final boolean patternGiven = pattern != null;
 
         if (block.isGiven() && patternGiven) {
-            localContext.runtime.getWarnings().warning(ID.BLOCK_UNUSED, "given block not used");
+            localContext.runtime.getWarnings().warn(ID.BLOCK_UNUSED, "given block not used");
         }
 
         try {
@@ -2218,6 +2220,7 @@ public class RubyEnumerable {
         }
 
         public IRubyObject call(ThreadContext context, IRubyObject[] args, Block block) {
+            ThreadContext.resetCallInfo(context);
             InternalVariables variables = enumerator.getInternalVariables();
             final IRubyObject enumerable = (IRubyObject) variables.getInternalVariable("chunk_enumerable");
             final RubyProc categorize = (RubyProc) variables.getInternalVariable("chunk_categorize");
@@ -2300,12 +2303,14 @@ public class RubyEnumerable {
         }
 
         public IRubyObject call(ThreadContext context, IRubyObject[] args, Block block) {
+            ThreadContext.resetCallInfo(context);
             result.append(packEnumValues(context, args));
             return context.nil;
         }
 
         @Override
         public IRubyObject call(ThreadContext context, IRubyObject arg, Block block) {
+            ThreadContext.resetCallInfo(context);
             result.append(arg);
             return context.nil;
         }
@@ -2340,6 +2345,7 @@ public class RubyEnumerable {
         }
 
         public IRubyObject call(ThreadContext context, IRubyObject[] largs, Block blk) {
+            ThreadContext.resetCallInfo(context);
             final Ruby runtime = context.runtime;
             final boolean blockGiven = block.isGiven();
 
@@ -2382,6 +2388,7 @@ public class RubyEnumerable {
         }
 
         public IRubyObject call(ThreadContext context, IRubyObject[] largs, Block blk) {
+            ThreadContext.resetCallInfo(context);
             IRubyObject value;
             if (largs.length == 0) {
                 value = context.nil;

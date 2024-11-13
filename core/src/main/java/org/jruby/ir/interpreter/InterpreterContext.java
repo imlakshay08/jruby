@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.function.Supplier;
 
 import org.jruby.RubySymbol;
+import org.jruby.ir.IRClosure;
 import org.jruby.ir.IRFlags;
 import org.jruby.ir.IRMetaClassBody;
 import org.jruby.ir.IRScope;
@@ -30,18 +31,19 @@ public class InterpreterContext {
 
     // startup interp will mark this at construction and not change but full interpreter will write it
     // much later after running compiler passes.  JIT will not use this field at all.
-    protected Instr[] instructions;
+    protected volatile Instr[] instructions;
 
     // Contains pairs of values.  The first value is number of instrs in this range + number of instrs before
     // this range.  The second number is the rescuePC.  getRescuePC(ipc) will walk this list and first odd value
     // less than this value will be the rpc.
-    protected int[] rescueIPCs = null;
+    protected volatile int[] rescueIPCs = null;
 
     // Cached computed fields
     protected boolean hasExplicitCallProtocol; // Only can be true in Full+
     protected boolean dynamicScopeEliminated; // Only can be true in Full+
     private boolean reuseParentDynScope; // Only can be true in Full+
     private final boolean metaClassBodyScope;
+    private final boolean isEND;
 
     private InterpreterEngine engine;
     public final Supplier<List<Instr>> instructionsCallback;
@@ -61,6 +63,7 @@ public class InterpreterContext {
         this.instructionsCallback = null; // engine != null
         this.temporaryVariableCount = temporaryVariableCount;
         this.flags = flags;
+        this.isEND = scope instanceof IRClosure && ((IRClosure) scope).isEND();
     }
 
     public InterpreterContext(IRScope scope, Supplier<List<Instr>> instructions, int temporaryVariableCount, EnumSet<IRFlags> flags) {
@@ -70,6 +73,7 @@ public class InterpreterContext {
         this.instructionsCallback = instructions;
         this.temporaryVariableCount = temporaryVariableCount;
         this.flags = flags;
+        this.isEND = scope instanceof IRClosure && ((IRClosure) scope).isEND();
     }
 
     protected void initialize() {
@@ -93,7 +97,7 @@ public class InterpreterContext {
         return instructions == null ? NO_INSTRUCTIONS : instructions;
     }
 
-    private void setInstructions(final List<Instr> instructions) {
+    private synchronized void setInstructions(final List<Instr> instructions) {
         this.instructions = instructions != null ? prepareBuildInstructions(instructions) : null;
     }
 
@@ -108,7 +112,7 @@ public class InterpreterContext {
         }
 
         Deque<Integer> markers = new ArrayDeque<>(8);
-        rescueIPCs = new int[length];
+        int[] rescueIPCs = new int[length];
         int rpc = -1;
 
         for (int ipc = 0; ipc < length; ipc++) {
@@ -124,6 +128,8 @@ public class InterpreterContext {
 
             rescueIPCs[ipc] = rpc;
         }
+
+        this.rescueIPCs = rescueIPCs;
 
         return linearizedInstrArray;
     }
@@ -215,16 +221,20 @@ public class InterpreterContext {
         this.dynamicScopeEliminated = dynamicScopeEliminated;
     }
 
+    public boolean isEND() {
+        return isEND;
+    }
+
     public boolean pushNewDynScope() {
         initialize();
 
-        return !dynamicScopeEliminated && !reuseParentDynScope;
+        return !dynamicScopeEliminated && !reuseParentDynScope();
     }
 
     public boolean reuseParentDynScope() {
         initialize();
 
-        return reuseParentDynScope;
+        return reuseParentDynScope || isEND;
     }
 
     public void setReuseParentDynScope(boolean reuseParentDynScope) {

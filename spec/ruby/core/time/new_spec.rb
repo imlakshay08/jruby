@@ -358,7 +358,7 @@ describe "Time.new with a timezone argument" do
 
       -> {
         Marshal.dump(time)
-      }.should raise_error(NoMethodError, /undefined method `name' for/)
+      }.should raise_error(NoMethodError, /undefined method [`']name' for/)
     end
   end
 
@@ -559,15 +559,15 @@ describe "Time.new with a timezone argument" do
 
         -> {
           Time.new("2020-012-25 00:56:17 +0900")
-        }.should raise_error(ArgumentError, "two digits mon is expected after `-': -012-25 00:")
+        }.should raise_error(ArgumentError, /\Atwo digits mon is expected after [`']-': -012-25 00:\z/)
 
         -> {
           Time.new("2020-2-25 00:56:17 +0900")
-        }.should raise_error(ArgumentError, "two digits mon is expected after `-': -2-25 00:56")
+        }.should raise_error(ArgumentError, /\Atwo digits mon is expected after [`']-': -2-25 00:56\z/)
 
         -> {
           Time.new("2020-12-215 00:56:17 +0900")
-        }.should raise_error(ArgumentError, "two digits mday is expected after `-': -215 00:56:")
+        }.should raise_error(ArgumentError, /\Atwo digits mday is expected after [`']-': -215 00:56:\z/)
 
         -> {
           Time.new("2020-12-25 000:56:17 +0900")
@@ -579,19 +579,19 @@ describe "Time.new with a timezone argument" do
 
         -> {
           Time.new("2020-12-25 00:516:17 +0900")
-        }.should raise_error(ArgumentError, "two digits min is expected after `:': :516:17 +09")
+        }.should raise_error(ArgumentError, /\Atwo digits min is expected after [`']:': :516:17 \+09\z/)
 
         -> {
           Time.new("2020-12-25 00:6:17 +0900")
-        }.should raise_error(ArgumentError, "two digits min is expected after `:': :6:17 +0900")
+        }.should raise_error(ArgumentError, /\Atwo digits min is expected after [`']:': :6:17 \+0900\z/)
 
         -> {
           Time.new("2020-12-25 00:56:137 +0900")
-        }.should raise_error(ArgumentError, "two digits sec is expected after `:': :137 +0900")
+        }.should raise_error(ArgumentError, /\Atwo digits sec is expected after [`']:': :137 \+0900\z/)
 
         -> {
           Time.new("2020-12-25 00:56:7 +0900")
-        }.should raise_error(ArgumentError, "two digits sec is expected after `:': :7 +0900")
+        }.should raise_error(ArgumentError, /\Atwo digits sec is expected after [`']:': :7 \+0900\z/)
 
         -> {
           Time.new("2020-12-25 00:56. +0900")
@@ -625,15 +625,21 @@ describe "Time.new with a timezone argument" do
 
         -> {
           Time.new("2020-12-25 00:56:17 +23:59:60")
-        }.should raise_error(ArgumentError, "utc_offset out of range")
+        }.should raise_error(ArgumentError, /utc_offset/)
 
         -> {
           Time.new("2020-12-25 00:56:17 +24:00")
-        }.should raise_error(ArgumentError, "utc_offset out of range")
+        }.should raise_error(ArgumentError, /utc_offset/)
 
         -> {
           Time.new("2020-12-25 00:56:17 +23:61")
-        }.should raise_error(ArgumentError, '"+HH:MM", "-HH:MM", "UTC" or "A".."I","K".."Z" expected for utc_offset: +23:61')
+        }.should raise_error(ArgumentError, /utc_offset/)
+
+        ruby_bug '#20797', ''...'3.4' do
+          -> {
+            Time.new("2020-12-25 00:56:17 +00:23:61")
+          }.should raise_error(ArgumentError, /utc_offset/)
+        end
       end
 
       it "raises ArgumentError if string has not ascii-compatible encoding" do

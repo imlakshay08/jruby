@@ -355,10 +355,6 @@ public abstract class JavaLang {
 
         static RubyClass define(final Ruby runtime, final RubyClass proxy) {
             proxy.defineAnnotatedMethods(Number.class);
-
-            proxy.defineAlias("to_int", "longValue");
-            proxy.defineAlias("to_f", "doubleValue");
-
             return proxy;
         }
 
@@ -641,7 +637,7 @@ public abstract class JavaLang {
 
         // JavaClass facade (compatibility) :
 
-        @JRubyMethod(required = 1)
+        @JRubyMethod
         public static IRubyObject extend_proxy(final ThreadContext context, IRubyObject self, IRubyObject extender) {
             java.lang.Class<?> klass = Java.unwrapClassProxy(self);
             RubyModule proxy = Java.getProxyClass(context.runtime, klass);
@@ -749,7 +745,7 @@ public abstract class JavaLang {
             return Java.getInstance(context.runtime, arrayClass);
         }
 
-        @JRubyMethod(required = 1)
+        @JRubyMethod
         public static IRubyObject new_array(ThreadContext context, IRubyObject self, IRubyObject length) {
             final java.lang.Class klass = unwrapJavaObject(self);
 
@@ -825,7 +821,7 @@ public abstract class JavaLang {
 
             RubyString buf = inspectPrefix(context, self.getMetaClass());
             RubyStringBuilder.cat(context.runtime, buf, SPACE);
-            buf.cat19(RubyString.newString(context.runtime, str).inspect());
+            buf.catWithCodeRange(RubyString.newString(context.runtime, str).inspect());
             RubyStringBuilder.cat(context.runtime, buf, GT); // >
 
             return buf;
@@ -899,7 +895,7 @@ public abstract class JavaLang {
 
         @Override
         public IRubyObject call(final ThreadContext context, final IRubyObject self, final RubyModule clazz, final java.lang.String name) {
-            java.lang.Object val = unwrapIfJavaObject(self);;
+            java.lang.Object val = unwrapIfJavaObject(self);
             return context.runtime.newString(val.toString());
         }
 

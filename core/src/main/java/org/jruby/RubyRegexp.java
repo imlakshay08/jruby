@@ -380,6 +380,12 @@ public class RubyRegexp extends RubyObject implements ReOptions, EncodingCapable
         return pattern;
     }
 
+    final Encoding checkEncoding(RubyString other) {
+        Encoding enc = other.isCompatibleWith(this);
+        if (enc == null) encodingMatchError(getRuntime(), pattern, other.getEncoding());
+        return enc;
+    }
+
     private static void encodingMatchError(Ruby runtime, Regex pattern, Encoding strEnc) {
         throw runtime.newEncodingCompatibilityError("incompatible encoding regexp match (" +
                 pattern.getEncoding() + " regexp with " + strEnc + " string)");
@@ -879,7 +885,7 @@ public class RubyRegexp extends RubyObject implements ReOptions, EncodingCapable
 
     /** rb_reg_init_copy
      */
-    @JRubyMethod(required = 1, visibility = Visibility.PRIVATE)
+    @JRubyMethod(visibility = Visibility.PRIVATE)
     @Override
     public IRubyObject initialize_copy(IRubyObject re) {
         if (this == re) return this;
@@ -934,7 +940,7 @@ public class RubyRegexp extends RubyObject implements ReOptions, EncodingCapable
                 newOptions.setEncodingNone(true);
                 return regexpInitialize(arg0.convertToString().getByteList(), ASCIIEncoding.INSTANCE, newOptions);
             } else {
-                metaClass.runtime.getWarnings().warn("encoding option is ignored - " + kcodeBytes);
+                metaClass.runtime.getWarnings().warnDeprecated("encoding option is ignored - " + kcodeBytes);
             }
         }
         return regexpInitializeString(arg0.convertToString(), newOptions);
@@ -1028,7 +1034,7 @@ public class RubyRegexp extends RubyObject implements ReOptions, EncodingCapable
         return metaClass.runtime.newFixnum(hash + (hash >> 5));
     }
 
-    @JRubyMethod(name = {"==", "eql?"}, required = 1)
+    @JRubyMethod(name = {"==", "eql?"})
     @Override
     public IRubyObject op_equal(ThreadContext context, IRubyObject other) {
         if (this == other) {
@@ -1073,7 +1079,7 @@ public class RubyRegexp extends RubyObject implements ReOptions, EncodingCapable
     /** rb_reg_eqq
      *
      */
-    @JRubyMethod(name = "===", required = 1, writes = BACKREF)
+    @JRubyMethod(name = "===", writes = BACKREF)
     public IRubyObject eqq(ThreadContext context, IRubyObject arg) {
         arg = operandNoCheck(arg);
 
@@ -1101,7 +1107,7 @@ public class RubyRegexp extends RubyObject implements ReOptions, EncodingCapable
     // MRI: rb_reg_match
 
     @Override
-    @JRubyMethod(name = "=~", required = 1, writes = BACKREF)
+    @JRubyMethod(name = "=~", writes = BACKREF)
     public IRubyObject op_match(ThreadContext context, IRubyObject str) {
         final RubyString[] strp = { null };
         int pos = matchPos(context, str, strp, true, 0);

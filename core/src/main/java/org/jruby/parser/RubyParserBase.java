@@ -39,6 +39,7 @@ package org.jruby.parser;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -59,6 +60,7 @@ import org.jruby.common.IRubyWarnings;
 import org.jruby.common.IRubyWarnings.ID;
 import org.jruby.common.RubyWarnings;
 import org.jruby.ext.coverage.CoverageData;
+import org.jruby.lexer.LexerSource;
 import org.jruby.lexer.yacc.LexContext;
 import org.jruby.lexer.yacc.RubyLexer;
 import org.jruby.lexer.yacc.StackState;
@@ -96,9 +98,6 @@ public abstract class RubyParserBase {
     // Should we warn if a variable is declared not actually used?
     private boolean warnOnUnusedVariables;
 
-    protected IRubyWarnings warnings;
-
-    protected ParserConfiguration configuration;
     private RubyParserResult result;
 
     public boolean isNextBreak = false;
@@ -113,8 +112,25 @@ public abstract class RubyParserBase {
     private Node numParamInner = null;
     private Node numParamOuter = null;
 
-    public RubyParserBase(IRubyWarnings warnings) {
-        this.warnings = warnings;
+    private Ruby runtime;
+
+    private DynamicScope existingScope;
+
+    protected ParserType type;
+
+    private int[] coverage = EMPTY_COVERAGE;
+
+    private static final int[] EMPTY_COVERAGE = new int[0];
+
+    private boolean frozenStringLiterals;
+
+    public RubyParserBase(Ruby runtime, LexerSource source, DynamicScope scope, ParserType type) {
+        this.runtime = runtime;
+        this.lexer = new RubyLexer(this, source, getWarnings());
+        this.existingScope = scope;
+        this.type = type;
+        this.result = new RubyParserResult();
+        frozenStringLiterals = runtime.getInstanceConfig().isFrozenStringLiteral();
     }
 
     public void reset() {
@@ -123,10 +139,6 @@ public abstract class RubyParserBase {
 
     public StaticScope getCurrentScope() {
         return currentScope;
-    }
-    
-    public ParserConfiguration getConfiguration() {
-        return configuration;
     }
     
     public void popCurrentScope() {
@@ -144,14 +156,14 @@ public abstract class RubyParserBase {
     }
     
     public void pushBlockScope() {
-        warnOnUnusedVariables = warnings.isVerbose();
-        currentScope = configuration.getRuntime().getStaticScopeFactory().newBlockScope(currentScope, lexer.getFile());
+        warnOnUnusedVariables = getWarnings().isVerbose();
+        currentScope = getRuntime().getStaticScopeFactory().newBlockScope(currentScope, lexer.getFile());
         scopedParserState = new ScopedParserState(scopedParserState);
     }
     
     public void pushLocalScope() {
-        warnOnUnusedVariables = warnings.isVerbose();
-        currentScope = configuration.getRuntime().getStaticScopeFactory().newLocalScope(currentScope, lexer.getFile());
+        warnOnUnusedVariables = getWarnings().isVerbose();
+        currentScope = getRuntime().getStaticScopeFactory().newLocalScope(currentScope, lexer.getFile());
         scopedParserState = new ScopedParserState(scopedParserState, lexer.getCmdArgumentState().getStack(), lexer.getConditionState().getStack());
         lexer.getCmdArgumentState().push0();
         lexer.getConditionState().push0();
@@ -258,7 +270,7 @@ public abstract class RubyParserBase {
             if (currentScope.isBlockScope() && slot != -1) {
                 if (isNumParamId(id) && isNumParamNested()) return null;
                 if (name.getBytes().equals(lexer.getCurrentArg())) {
-                    compile_error(str(getConfiguration().getRuntime(), "circular argument reference - ", name));
+                    compile_error(str(getRuntime(), "circular argument reference - ", name));
                 }
 
                 Node newNode = new DVarNode(node.getLine(), slot, name);
@@ -272,7 +284,7 @@ public abstract class RubyParserBase {
             StaticScope.Type type = currentScope.getType();
             if (type == StaticScope.Type.LOCAL) {
                 if (name.getBytes().equals(lexer.getCurrentArg())) {
-                    compile_error(str(getConfiguration().getRuntime(), "circular argument reference - ", name));
+                    compile_error(str(getRuntime(), "circular argument reference - ", name));
                 }
 
                 Node newNode = new LocalVarNode(node.getLine(), slot, name);
@@ -356,7 +368,7 @@ public abstract class RubyParserBase {
     public Node declareIdentifier(ByteList byteName) {
         RubySymbol name = symbolID(byteName);
         if (byteName.equals(lexer.getCurrentArg())) {
-            compile_error(str(getConfiguration().getRuntime(), "circular argument reference - ", name));
+            compile_error(str(getRuntime(), "circular argument reference - ", name));
         }
 
         String id = name.idString();
@@ -366,6 +378,11 @@ public abstract class RubyParserBase {
         int slot;
         if (isNumParam && numberedParam(id)) {
             if (isNumParamNested()) return null;
+
+            // We go over the top here and make sure the order is always ascending even if the other
+            // numbered params are not used. This is so local_variables will properly display in
+            // ascending order.
+            makePreNumArgs(Integer.parseInt(id.substring(1)));
 
             slot = currentScope.addVariable(id);
             node = currentScope.isBlockScope() ?
@@ -421,8 +438,10 @@ public abstract class RubyParserBase {
     public Node newline_node(Node node, int line) {
         if (node == null) return null;
 
-        node = remove_begin(node);
-        configuration.coverLine(line);
+        Node newNode = remove_begin(node);
+        // Conservative fix...try and use line unless we see remove has been removed then use the newNode.
+        if (newNode != node) line = newNode.getLine();
+        coverLine(line);
         node.setNewline();
 
         return node;
@@ -431,7 +450,7 @@ public abstract class RubyParserBase {
     // This is the last node made in the AST unintuitively so so post-processing can occur here.
     public Node addRootNode(Node topOfAST) {
         int line;
-        CoverageData coverageData = configuration.finishCoverage(lexer.getFile(), lexer.lineno());
+        CoverageData coverageData = finishCoverage(lexer.getFile(), lexer.lineno());
         if (result.getBeginNodes().isEmpty()) {
             if (topOfAST == null) {
                 topOfAST = NilImplicitNode.NIL;
@@ -474,7 +493,7 @@ public abstract class RubyParserBase {
             head = new BlockNode(head.getLine()).add(head);
         }
 
-        if (warnings.isVerbose() && isBreakStatement(((ListNode) head).getLast()) && Options.PARSER_WARN_NOT_REACHED.load()) {
+        if (getWarnings().isVerbose() && isBreakStatement(((ListNode) head).getLast()) && Options.PARSER_WARN_NOT_REACHED.load()) {
             warning(ID.STATEMENT_NOT_REACHED, lexer.getFile(), tail.getLine(), "statement not reached");
         }
 
@@ -638,9 +657,11 @@ public abstract class RubyParserBase {
     }
     
     public void warnUnlessEOption(ID id, Node node, String message) {
-        if (!configuration.isInlineSource()) {
-            warning(id, lexer.getFile(), node.getLine(), message);
-        }
+        if (!isInline()) warning(id, lexer.getFile(), node.getLine(), message);
+    }
+
+    private boolean isInline() {
+        return type == ParserType.INLINE;
     }
 
     boolean value_expr_check(Node node) {
@@ -652,12 +673,14 @@ public abstract class RubyParserBase {
             switch (node.getNodeType()) {
                 case RETURNNODE: case BREAKNODE: case NEXTNODE: case REDONODE: case RETRYNODE:
                     return void_node ? void_node : true;
-                case PATTERNCASENODE:
-                    if (((PatternCaseNode) node).getCases().size() >= 0 && ((PatternCaseNode) node).getCases().get(0) != null) {
+                case PATTERNCASENODE: {
+                    Node[] cases = ((PatternCaseNode) node).getCases();
+                    if (cases != null && cases.length > 0 && cases[0] != null) {
                         return false;
                     }
                     /* single line pattern matching */
                     return void_node ? void_node : true;
+                }
                 case BLOCKNODE:
                     node = ((BlockNode) node).getLast();
                     break;
@@ -710,7 +733,7 @@ public abstract class RubyParserBase {
      * @param node to be checked.
      */
     public void void_expr(Node node) {
-        if (!warnings.isVerbose()) return;
+        if (!getWarnings().isVerbose()) return;
         
         if (node == null) return;
             
@@ -800,7 +823,7 @@ public abstract class RubyParserBase {
                 if (currentScope.isBlockScope() && slot != -1) {
                     if (isNumParamId(id2) && isNumParamNested()) return null;
                     if (name.getBytes().equals(lexer.getCurrentArg())) {
-                        compile_error(str(getConfiguration().getRuntime(), "circular argument reference - ", name));
+                        compile_error(str(getRuntime(), "circular argument reference - ", name));
                     }
 
                     Node newNode = new DVarNode(loc, slot, name);
@@ -814,7 +837,7 @@ public abstract class RubyParserBase {
                 StaticScope.Type type = currentScope.getType();
                 if (type == StaticScope.Type.LOCAL && slot != -1) {
                     if (name.getBytes().equals(lexer.getCurrentArg())) {
-                        compile_error(str(getConfiguration().getRuntime(), "circular argument reference - ", name));
+                        compile_error(str(getRuntime(), "circular argument reference - ", name));
                     }
 
                     Node newNode = new LocalVarNode(loc, slot, name);
@@ -854,7 +877,7 @@ public abstract class RubyParserBase {
      * @param node to be checked.
      */
     public Node void_stmts(Node node) {
-        if (!warnings.isVerbose() || !(node instanceof BlockNode)) return node;
+        if (!getWarnings().isVerbose() || !(node instanceof BlockNode)) return node;
 
         BlockNode blockNode = (BlockNode) node;
         int size = blockNode.size();
@@ -906,7 +929,7 @@ public abstract class RubyParserBase {
         return node == null ? NilImplicitNode.NIL : node;
     }
 
-    private Node cond0(Node node, boolean method) {
+    private Node cond0(Node node, ConditionType type) {
         checkAssignmentInCondition(node);
 
         if (node == null) return new NilNode(lexer.getRubySourceline());
@@ -918,89 +941,110 @@ public abstract class RubyParserBase {
             case DSTRNODE:
             case EVSTRNODE:
             case STRNODE:
-                if (!method) warn(node.getLine(), "string literal in condition");
+                switchByCondTypeWarn(type, node.getLine(), "string ");
                 break;
             case DREGEXPNODE: {
                 int line = node.getLine();
 
+                if (!isInline()) switchByCondTypeWarning(type, node.getLine(), "regex ");
+
                 return new Match2Node(line, node, new GlobalVarNode(line, symbolID(DOLLAR_UNDERSCORE)));
             }
             case ANDNODE:
-                leftNode = cond0(((AndNode) node).getFirstNode(), false);
-                rightNode = cond0(((AndNode) node).getSecondNode(), false);
+                leftNode = cond0(((AndNode) node).getFirstNode(), ConditionType.IN_COND);
+                rightNode = cond0(((AndNode) node).getSecondNode(), ConditionType.IN_COND);
             
                 return new AndNode(node.getLine(), makeNullNil(leftNode), makeNullNil(rightNode));
             case ORNODE:
-                leftNode = cond0(((OrNode) node).getFirstNode(), false);
-                rightNode = cond0(((OrNode) node).getSecondNode(), false);
+                leftNode = cond0(((OrNode) node).getFirstNode(), ConditionType.IN_COND);
+                rightNode = cond0(((OrNode) node).getSecondNode(), ConditionType.IN_COND);
             
                 return new OrNode(node.getLine(), makeNullNil(leftNode), makeNullNil(rightNode));
             case DOTNODE: {
                 DotNode dotNode = (DotNode) node;
-                if (dotNode.isLiteral()) return node;
-            
+
+                // FIXME: I think we can delete this
                 ByteList label = new ByteList(new byte[] {'F', 'L', 'I', 'P'}, USASCII_ENCODING);
                 label.append(Long.toString(node.hashCode()).getBytes());
                 RubySymbol symbolID = symbolID(label);
 
-                if (!method && !configuration.isInlineSource()) {
-                    if ((dotNode.getBeginNode() instanceof TrueNode && dotNode.getEndNode() instanceof FalseNode) ||
-                            (dotNode.getBeginNode() instanceof FalseNode && dotNode.getEndNode() instanceof TrueNode)) {
-                        warn(node.getLine(), "range literal in condition");
-                    }
+                Node begin = range_op(((DotNode) node).getBeginNode());
+                Node end = range_op(((DotNode) node).getEndNode());
 
-                }
-
-                return new FlipNode(node.getLine(),
-                        getFlipConditionNode(((DotNode) node).getBeginNode()),
-                        getFlipConditionNode(((DotNode) node).getEndNode()),
+                return new FlipNode(node.getLine(), begin, end,
                         dotNode.isExclusive(), currentScope.getLocalScope().addVariable(symbolID.idString()));
             }
             case SYMBOLNODE:
             case DSYMBOLNODE:
-            case FIXNUMNODE:
-                if (!method) warn(node.getLine(), "literal in condition");
-                break;
+                switchByCondTypeWarning(type, node.getLine(), "symbol ");
             case REGEXPNODE:
                 if (Options.PARSER_WARN_REGEX_CONDITION.load()) {
-                    if (!method) warnUnlessEOption(ID.REGEXP_LITERAL_IN_CONDITION, node, "regex literal in condition");
+                    if (!isInline()) switchByCondTypeWarn(type, node.getLine(), "regex ");
                 }
-            
                 return new MatchNode(node.getLine(), node);
+            case FIXNUMNODE:
+                switchByCondTypeWarning(type, node.getLine(), "");
+                break;
+
         }
 
         return node;
     }
 
+    private void switchByCondTypeWarning(ConditionType type, int line, String string) {
+        switch(type) {
+            case IN_COND:
+                warning(line, string + "literal in condition");
+                break;
+            case IN_FF:
+                warning(line, string + "literal in flip-flop");
+                break;
+        }
+    }
+
+    private void switchByCondTypeWarn(ConditionType type, int line, String string) {
+        switch(type) {
+            case IN_COND:
+                warn(line, string + "literal in condition");
+                break;
+            case IN_FF:
+                warn(line, string + "literal in flip-flop");
+                break;
+        }
+    }
+
     public Node cond(Node node) {
-        return cond0(node, false);
+        return cond0(node, ConditionType.IN_COND);
     }
 
     public Node method_cond(Node node) {
-        return cond0(node, true);
+        return cond0(node, ConditionType.IN_OP);
     }
 
     // we just reverse then/else for unless
     public Node new_if(int line, Node condition, Node thenNode, Node elseNode) {
         if (condition == null) return elseNode;
 
-        condition = cond0(condition, false);
+        condition = cond0(condition, ConditionType.IN_COND);
 
         return new IfNode(line, condition, thenNode, elseNode);
     }
 
-    /* MRI: range_op */
-    private Node getFlipConditionNode(Node node) {
-        if (!configuration.isInlineSource()) return node;
-        
-        node = cond0(node, false);
+    enum ConditionType {
+        IN_OP, IN_COND, IN_FF;
+    }
 
+    /* MRI: range_op */
+    private Node range_op(Node node) {
+        if (node == null) return null;
+
+        value_expr(node);
         if (node instanceof FixnumNode) {
-            warnUnlessEOption(ID.LITERAL_IN_CONDITIONAL_RANGE, node, "integer literal in conditional range");
+            warnUnlessEOption(ID.LITERAL_IN_CONDITIONAL_RANGE, node, "integer literal in flip-flop");
             return call_bin_op(node, EQ_EQ, new GlobalVarNode(node.getLine(), symbolID(DOLLAR_DOT)));
         } 
 
-        return node;
+        return cond0(node, ConditionType.IN_FF);
     }
 
     public SValueNode newSValueNode(int line, Node node) {
@@ -1206,11 +1250,11 @@ public abstract class RubyParserBase {
     public RubySymbol symbolID(ByteList identifierValue) {
         // FIXME: We walk this during identifier construction so we should calculate CR without having to walk twice.
         if (RubyString.scanForCodeRange(identifierValue) == StringSupport.CR_BROKEN) {
-            Ruby runtime = getConfiguration().getRuntime();
-            throw runtime.newEncodingError(str(runtime, "invalid symbol in encoding " + lexer.getEncoding() + " :\"", inspectIdentifierByteList(runtime, identifierValue), "\""));
+            Ruby runtime = getRuntime();
+            throw runtime.newSyntaxError(str(runtime, "invalid symbol in encoding " + lexer.getEncoding() + " :\"", inspectIdentifierByteList(runtime, identifierValue), "\""));
         }
 
-        return RubySymbol.newIDSymbol(getConfiguration().getRuntime(), identifierValue);
+        return RubySymbol.newIDSymbol(getRuntime(), identifierValue);
     }
 
     public boolean isLazy(String callType) {
@@ -1295,13 +1339,17 @@ public abstract class RubyParserBase {
     *  Description of the RubyMethod
     */
     public void initTopLocalVariables() {
-        currentScope = configuration.getTopStaticScope(lexer.getFile());
+        currentScope = getTopStaticScope(lexer.getFile());
         scopedParserState = new ScopedParserState(null);
-        warnOnUnusedVariables = warnings.isVerbose() && !configuration.isEvalParse() && !configuration.isInlineSource();
+        warnOnUnusedVariables = getWarnings().isVerbose() && !isEval() && !isInline();
+    }
+
+    boolean isEval() {
+        return type == ParserType.EVAL;
     }
 
     public void finalizeDynamicScope() {
-        getResult().setScope(configuration.finalizeDynamicScope(currentScope));
+        getResult().setScope(finalizeDynamicScope(currentScope));
     }
     /**
      * Gets the result.
@@ -1309,26 +1357,6 @@ public abstract class RubyParserBase {
      */
     public RubyParserResult getResult() {
         return result;
-    }
-
-    /**
-     * Sets the result.
-     * @param result The result to set
-     */
-    public void setResult(RubyParserResult result) {
-        this.result = result;
-    }
-
-    /**
-     * Sets the configuration.
-     * @param configuration The configuration to set
-     */
-    public void setConfiguration(ParserConfiguration configuration) {
-        this.configuration = configuration;
-    }
-
-    public void setLexer(RubyLexer lexer) {
-        this.lexer = lexer;
     }
 
     public DStrNode createDStrNode(int line) {
@@ -1387,7 +1415,6 @@ public abstract class RubyParserBase {
                 DStrNode newDStr = new DStrNode(head.getLine(), ((DStrNode) tail).getEncoding());
                 newDStr.add(head);
                 newDStr.addAll(tail);
-                if (getConfiguration().isFrozenStringLiteral()) newDStr.setFrozen(true);
                 return newDStr;
             } 
 
@@ -1539,7 +1566,7 @@ public abstract class RubyParserBase {
             final Node key = pair.getKey();
             if (!(key instanceof LiteralValue)) continue;
             if (encounteredKeys.containsKey(key)) {
-                Ruby runtime = getConfiguration().getRuntime();
+                Ruby runtime = getRuntime();
                 IRubyObject value = ((LiteralValue) key).literalValue(runtime);
                 warning(ID.AMBIGUOUS_ARGUMENT, lexer.getFile(), hash.getLine(), str(runtime, "key ", value.inspect(),
                         " is duplicated and overwritten on line " + (key.getLine() + 1)));
@@ -1592,16 +1619,16 @@ public abstract class RubyParserBase {
     }
 
     public void warn(int line, String message) {
-        warnings.warn(ID.USELESS_EXPRESSION, lexer.getFile(), line + 1, message); // node/lexer lines are 0 based
+        getWarnings().warn(ID.USELESS_EXPRESSION, lexer.getFile(), line + 1, message); // node/lexer lines are 0 based
     }
 
     // FIXME: Replace this with file/line version and stop using ISourcePosition
     public void warning(int line, String message) {
-        if (warnings.isVerbose()) warning(ID.USELESS_EXPRESSION, lexer.getFile(), line, message);
+        warning(ID.USELESS_EXPRESSION, lexer.getFile(), line, message);
     }
 
     public void warning(ID id, String file, int line, String message) {
-        warnings.warning(id, file, line + 1, message); // node/lexer lines are 0 based
+        getWarnings().warn(id, file, line + 1, message); // node/lexer lines are 0 based
     }
 
     // ENEBO: Totally weird naming (in MRI is not allocated and is a local var name) [1.9]
@@ -1636,6 +1663,11 @@ public abstract class RubyParserBase {
     }
 
     public ArgumentNode arg_var(ByteList byteName) {
+        // FIXME: parser is sending some keyword args as 'a:' instead of 'a' and since this is illegal we are
+        //  working around it here.  Long term fix is to audit and figure out where this is happening and correct
+        //  it.  Prism is replacing this parser so this felt like a lot less work.
+        int length = byteName.length();
+        if (length > 0 && byteName.get(length - 1) == ':') byteName.setRealSize(length - 1);
         RubySymbol name = symbolID(byteName);
         numparam_name(byteName);
 
@@ -1752,13 +1784,13 @@ public abstract class RubyParserBase {
     }
 
     private List<Integer> allocateNamedLocals(RegexpNode regexpNode) {
-        RubyRegexp pattern = RubyRegexp.newRegexp(configuration.getRuntime(), regexpNode.getValue(), regexpNode.getOptions());
+        RubyRegexp pattern = RubyRegexp.newRegexp(getRuntime(), regexpNode.getValue(), regexpNode.getOptions());
         pattern.setLiteral();
         String[] names = pattern.getNames();
         List<Integer> locals = new ArrayList<>();
         StaticScope scope = getCurrentScope();
 
-        Ruby runtime = getConfiguration().getRuntime();
+        Ruby runtime = getRuntime();
         for (String name : names) {
             if (RubyLexer.getKeyword(name) == null && !Character.isUpperCase(name.charAt(0))) {
                 String id = runtime.newSymbol(name).idString();
@@ -1787,11 +1819,11 @@ public abstract class RubyParserBase {
             message += (addNewline ? "\n" : "") + line;
         }
 
-        throw getConfiguration().getRuntime().newSyntaxError(errorMessage + message);
+        throw getRuntime().newSyntaxError(errorMessage + message);
     }
 
     public Node new_regexp(int line, Node contents, RegexpNode end) {
-        Ruby runtime = configuration.getRuntime();
+        Ruby runtime = getRuntime();
         RegexpOptions options = end.getOptions();
         Encoding encoding = lexer.getEncoding();
 
@@ -1840,7 +1872,7 @@ public abstract class RubyParserBase {
     // regexp options encoding so dregexps can end up starting with the
     // right encoding.
     private ByteList createMaster(RegexpOptions options) {
-        Encoding encoding = options.setup(configuration.getRuntime());
+        Encoding encoding = options.setup(getRuntime());
 
         return new ByteList(ByteList.NULL_ARRAY, encoding);
     }
@@ -1973,7 +2005,7 @@ public abstract class RubyParserBase {
     }
 
     public void warn_experimental(int line, String message) {
-        ((RubyWarnings) warnings).warnExperimental(lexer.getFile(), line, message);
+        ((RubyWarnings) getWarnings()).warnExperimental(lexer.getFile(), line, message);
     }
 
     public Node rescued_expr(int line, Node arg, Node rescue) {
@@ -2088,17 +2120,10 @@ public abstract class RubyParserBase {
         // FIXME: IMPL
     }
 
-    /** The parse method use an lexer stream and parse it to an AST node
-     * structure
-     */
-    public RubyParserResult parse(ParserConfiguration configuration) throws IOException {
-        reset();
-        setConfiguration(configuration);
-        setResult(new RubyParserResult());
+    public RubyParserResult parse() throws IOException {
+        yyparse(lexer, runtime.getInstanceConfig().isDebug() ? new YYDebug() : null);
 
-        yyparse(lexer, configuration.isDebug() ? new YYDebug() : null);
-
-        return getResult();
+        return result;
     }
 
     protected abstract Object yyparse(RubyLexer lexer, Object yyDebug) throws IOException;
@@ -2204,7 +2229,7 @@ public abstract class RubyParserBase {
     }
 
     public Ruby getRuntime() {
-        return lexer.getRuntime();
+        return runtime;
     }
 
     public Node nil() {
@@ -2213,6 +2238,92 @@ public abstract class RubyParserBase {
 
     public RubySymbol get_id(ByteList id) {
         return symbolID(id);
+    }
+
+    public IRubyWarnings getWarnings() {
+        return runtime.getWarnings();
+    }
+
+    public boolean isEndSeen() {
+        return lexer.isEndSeen();
+    }
+
+    public boolean isFrozenStringLiteral() {
+        return frozenStringLiterals;
+    }
+
+    public void setFrozenStringLiteral(boolean b) {
+        frozenStringLiterals = b;
+    }
+
+    public DynamicScope finalizeDynamicScope(StaticScope staticScope) {
+        // Eval scooped up some new variables changing the size of the scope.
+        if (existingScope != null && (type != ParserType.NORMAL)) {
+            existingScope.growIfNeeded();
+            return existingScope;
+        }
+
+        return DynamicScope.newDynamicScope(staticScope, existingScope);
+    }
+
+    /**
+     * Returns the static scope which represents the top of the parse.  If an eval
+     * then we will have an existing scope to return.  If not then we make a new
+     * one since we are starting from scratch.
+     *
+     * @param file to name top scope if we have a new scope
+     * @return a static scope
+     */
+    public StaticScope getTopStaticScope(String file) {
+        return existingScope != null ?
+                existingScope.getStaticScope() :
+                runtime.getStaticScopeFactory().newLocalScope(null, file);
+    }
+
+    public boolean isCoverageEnabled() {
+        return !isEval() && getRuntime().getCoverageData().isCoverageEnabled();
+    }
+
+    /**
+     * Zero out coverable lines as they're encountered
+     */
+    public void coverLine(int i) {
+        // We had an overflow so we cannot mark whatever line this is as covered.
+        if (i < 0) return;
+        if (isCoverageEnabled()) {
+            growCoverageLines(i);
+            coverage[i] = 0;
+        }
+    }
+
+    /**
+     *  Called by coverLine to grow it large enough to add new covered line.
+     *  Also called at end up parse to pick up any extra non-code lines which
+     *  should be marked -1 for not valid code lines.
+     */
+    public void growCoverageLines(int i) {
+        if (coverage == null) {
+            coverage = new int[i + 1];
+        } else if (coverage.length <= i) {
+            int[] newCoverage = new int[i + 1];
+            Arrays.fill(newCoverage, -1);
+            System.arraycopy(coverage, 0, newCoverage, 0, coverage.length);
+            coverage = newCoverage;
+        }
+    }
+
+    /**
+     * At end of a parse if coverage is enabled we will do final processing
+     * of the primitive coverage array and make sure runtimes coverage data
+     * has been updated with this new data.
+     */
+    public CoverageData finishCoverage(String file, int lines) {
+        if (!isCoverageEnabled()) return null;
+
+        growCoverageLines(lines);
+        CoverageData data = runtime.getCoverageData();
+        data.prepareCoverage(file, coverage);
+        return data;
     }
 
     public static final ByteList NOT = BANG;

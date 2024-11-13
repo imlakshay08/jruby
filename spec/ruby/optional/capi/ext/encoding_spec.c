@@ -271,15 +271,12 @@ static VALUE encoding_spec_rb_enc_str_asciionly_p(VALUE self, VALUE str) {
   }
 }
 
-RBIMPL_WARNING_PUSH()
-RBIMPL_WARNING_IGNORED(-Wformat-security)
 static VALUE encoding_spec_rb_enc_raise(VALUE self, VALUE encoding, VALUE exception_class, VALUE format) {
   rb_encoding *e = rb_to_encoding(encoding);
   const char *f = RSTRING_PTR(format);
 
   rb_enc_raise(e, exception_class, "%s", f);
 }
-RBIMPL_WARNING_POP()
 
 static VALUE encoding_spec_rb_uv_to_utf8(VALUE self, VALUE buf, VALUE num) {
   int len = rb_uv_to_utf8(RSTRING_PTR(buf), NUM2INT(num));
@@ -321,6 +318,10 @@ static VALUE encoding_spec_rb_enc_left_char_head(VALUE self, VALUE str, VALUE of
   char *ptr = RSTRING_PTR(str);
   char *result = rb_enc_left_char_head(ptr, ptr + NUM2INT(offset), RSTRING_END(str), rb_enc_get(str));
   return LONG2NUM(result - ptr);
+}
+
+static VALUE encoding_spec_rb_define_dummy_encoding(VALUE self, VALUE name) {
+  return INT2NUM(rb_define_dummy_encoding(RSTRING_PTR(name)));
 }
 
 void Init_encoding_spec(void) {
@@ -382,6 +383,7 @@ void Init_encoding_spec(void) {
   rb_define_method(cls, "rb_uv_to_utf8", encoding_spec_rb_uv_to_utf8, 2);
   rb_define_method(cls, "ONIGENC_MBC_CASE_FOLD", encoding_spec_ONIGENC_MBC_CASE_FOLD, 1);
   rb_define_method(cls, "rb_enc_left_char_head", encoding_spec_rb_enc_left_char_head, 2);
+  rb_define_method(cls, "rb_define_dummy_encoding", encoding_spec_rb_define_dummy_encoding, 1);
 }
 
 #ifdef __cplusplus

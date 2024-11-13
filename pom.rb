@@ -70,10 +70,10 @@ project 'JRuby', 'https://github.com/jruby/jruby' do
               'rake.version' => '13.0.6',
               'jruby-launcher.version' => '1.1.6',
               'ant.version' => '1.9.8',
-              'asm.version' => '9.2',
+              'asm.version' => '9.7.1',
               'jar-dependencies.version' => '0.4.1',
-              'jffi.version' => '1.3.12',
-              'joda.time.version' => '2.12.5' )
+              'jffi.version' => '1.3.13',
+              'joda.time.version' => '2.12.7' )
 
   plugin_management do
     jar( 'junit:junit:4.13.1',
@@ -160,10 +160,17 @@ project 'JRuby', 'https://github.com/jruby/jruby' do
                    :phase => 'site-deploy' )
   end
 
-  modules [ 'shaded', 'core', 'lib' ]
-
   build do
     default_goal 'install'
+  end
+
+  modules("core", "shaded")
+
+  profile :stdlib do
+    activation do
+      property name: '!core'
+    end
+    modules(["lib"])
   end
 
   profile 'test' do
@@ -302,6 +309,12 @@ project 'JRuby', 'https://github.com/jruby/jruby' do
       jdk '1.8'
     end
     plugin :javadoc, :additionalparam => '-Xdoclint:none'
+  end
+
+  profile 'core' do
+    activation do
+      property name: 'core'
+    end
   end
 
   reporting do

@@ -56,6 +56,7 @@ import org.jruby.ast.VCallNode;
 import org.jruby.ir.IRMethod;
 import org.jruby.ir.IRScope;
 import org.jruby.ir.IRScopeType;
+import org.jruby.runtime.Block;
 import org.jruby.runtime.DynamicScope;
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.Signature;
@@ -75,7 +76,7 @@ import org.jruby.runtime.scope.ManyVarsDynamicScope;
  * will point to the previous scope of the enclosing module/class (cref).
  * 
  */
-public class StaticScope implements Serializable {
+public class StaticScope implements Serializable, Cloneable {
     public static final int MAX_SPECIALIZED_SIZE = 50;
     private static final long serialVersionUID = 3423852552352498148L;
 
@@ -409,7 +410,8 @@ public class StaticScope implements Serializable {
         if (name.equals("_")) return true;
         int slot = exists(name);
 
-        return slot >= 0 && firstKeywordIndex != -1 && slot >= firstKeywordIndex;
+        return slot >= 0 && firstKeywordIndex != -1 &&
+                slot >= firstKeywordIndex  && slot < firstKeywordIndex + signature.kwargs();
     }
 
     /**
@@ -731,14 +733,7 @@ public class StaticScope implements Serializable {
         this.ivarNames = ivarWrites;
     }
 
-    private boolean isTopScopeEvals() {
-        Ruby runtime = cref.getRuntime();
-        StaticScope scope = this;
-        while (scope != null && scope.type == Type.EVAL) {
-            if (cref != runtime.getTopSelf()) return false;
-            scope = scope.enclosingScope;
-        }
-
-        return scope != null && scope.enclosingScope == null;
+    public boolean isRuby2Keywords() {
+        return irScope.isRuby2Keywords();
     }
 }
