@@ -199,6 +199,14 @@ class TestIOBuffer < Test::Unit::TestCase
     assert_positive buffer2 <=> buffer1
   end
 
+  def test_compare_zero_length
+    buffer1 = IO::Buffer.new(0)
+    buffer2 = IO::Buffer.new(1)
+
+    assert_negative buffer1 <=> buffer2
+    assert_positive buffer2 <=> buffer1
+  end
+
   def test_slice
     buffer = IO::Buffer.new(128)
     slice = buffer.slice(8, 32)
@@ -226,6 +234,43 @@ class TestIOBuffer < Test::Unit::TestCase
     assert_raise ArgumentError do
       buffer.slice(-10, 10)
     end
+  end
+
+  def test_slice_readonly
+    hello = %w"Hello World".join(" ").freeze
+    buffer = IO::Buffer.for(hello)
+    slice = buffer.slice
+    assert_predicate slice, :readonly?
+    assert_raise IO::Buffer::AccessError do
+      # This breaks the literal in string pool and many other tests in this file.
+      slice.set_string("Adios", 0, 5)
+    end
+    assert_equal "Hello World", hello
+  end
+
+  def test_transfer
+    hello = %w"Hello World".join(" ")
+    buffer = IO::Buffer.for(hello)
+    transferred = buffer.transfer
+    assert_equal "Hello World", transferred.get_string
+    assert_predicate buffer, :null?
+    assert_raise IO::Buffer::AccessError do
+      transferred.set_string("Goodbye")
+    end
+    assert_equal "Hello World", hello
+  end
+
+  def test_transfer_in_block
+    hello = %w"Hello World".join(" ")
+    buffer = IO::Buffer.for(hello, &:transfer)
+    assert_equal "Hello World", buffer.get_string
+    buffer.set_string("Ciao!")
+    assert_equal "Ciao! World", hello
+    hello.freeze
+    assert_raise IO::Buffer::AccessError do
+      buffer.set_string("Hola")
+    end
+    assert_equal "Ciao! World", hello
   end
 
   def test_locked
@@ -268,6 +313,14 @@ class TestIOBuffer < Test::Unit::TestCase
     assert_raise_with_message(ArgumentError, /Offset can't be negative/) do
       buffer.get_string(-1)
     end
+  end
+
+  def test_zero_length_get_string
+    buffer = IO::Buffer.new.slice(0, 0)
+    assert_equal "", buffer.get_string
+
+    buffer = IO::Buffer.new(0)
+    assert_equal "", buffer.get_string
   end
 
   # We check that values are correctly round tripped.
@@ -316,6 +369,13 @@ class TestIOBuffer < Test::Unit::TestCase
     end
   end
 
+  def test_zero_length_get_set_values
+    buffer = IO::Buffer.new(0)
+
+    assert_equal [], buffer.get_values([], 0)
+    assert_equal 0, buffer.set_values([], 0, [])
+  end
+
   def test_values
     buffer = IO::Buffer.new(128)
 
@@ -340,11 +400,23 @@ class TestIOBuffer < Test::Unit::TestCase
     end
   end
 
+  def test_zero_length_each
+    buffer = IO::Buffer.new(0)
+
+    assert_equal [], buffer.each(:U8).to_a
+  end
+
   def test_each_byte
     string = "The quick brown fox jumped over the lazy dog."
     buffer = IO::Buffer.for(string)
 
     assert_equal string.bytes, buffer.each_byte.to_a
+  end
+
+  def test_zero_length_each_byte
+    buffer = IO::Buffer.new(0)
+
+    assert_equal [], buffer.each_byte.to_a
   end
 
   def test_clear
@@ -378,9 +450,11 @@ class TestIOBuffer < Test::Unit::TestCase
     input.close
   end
 
-  def hello_world_tempfile
+  def hello_world_tempfile(repeats = 1)
     io = Tempfile.new
-    io.write("Hello World")
+    repeats.times do
+      io.write("Hello World")
+    end
     io.seek(0)
 
     yield io
@@ -412,6 +486,15 @@ class TestIOBuffer < Test::Unit::TestCase
     end
   end
 
+  def test_read_with_length_and_offset
+    hello_world_tempfile(100) do |io|
+      buffer = IO::Buffer.new(1024)
+      # Only read 24 bytes from the file, as we are starting at offset 1000 in the buffer.
+      assert_equal 24, buffer.read(io, 0, 1000)
+      assert_equal "Hello World", buffer.get_string(1000, 11)
+    end
+  end
+
   def test_write
     io = Tempfile.new
 
@@ -421,6 +504,19 @@ class TestIOBuffer < Test::Unit::TestCase
 
     io.seek(0)
     assert_equal "Hello", io.read(5)
+  ensure
+    io.close!
+  end
+
+  def test_write_with_length_and_offset
+    io = Tempfile.new
+
+    buffer = IO::Buffer.new(5)
+    buffer.set_string("Hello")
+    buffer.write(io, 4, 1)
+
+    io.seek(0)
+    assert_equal "ello", io.read(4)
   ensure
     io.close!
   end
@@ -516,5 +612,75 @@ class TestIOBuffer < Test::Unit::TestCase
     assert_equal message, string
   rescue NotImplementedError
     omit "Fork/shared memory is not supported."
+  end
+
+  def test_private
+    Tempfile.create(%w"buffer .txt") do |file|
+      file.write("Hello World")
+
+      buffer = IO::Buffer.map(file, nil, 0, IO::Buffer::PRIVATE)
+      begin
+        assert buffer.private?
+        refute buffer.readonly?
+
+        buffer.set_string("J")
+
+        # It was not changed because the mapping was private:
+        file.seek(0)
+        assert_equal "Hello World", file.read
+      ensure
+        buffer&.free
+      end
+    end
+  end
+
+  def test_copy_overlapped_fwd
+    buf = IO::Buffer.for('0123456789').dup
+    buf.copy(buf, 3, 7)
+    assert_equal '0120123456', buf.get_string
+  end
+
+  def test_copy_overlapped_bwd
+    buf = IO::Buffer.for('0123456789').dup
+    buf.copy(buf, 0, 7, 3)
+    assert_equal '3456789789', buf.get_string
+  end
+
+  def test_copy_null_destination
+    buf = IO::Buffer.new(0)
+    assert_predicate buf, :null?
+    buf.copy(IO::Buffer.for('a'), 0, 0)
+    assert_predicate buf, :empty?
+  end
+
+  def test_copy_null_source
+    buf = IO::Buffer.for('a').dup
+    src = IO::Buffer.new(0)
+    assert_predicate src, :null?
+    buf.copy(src, 0, 0)
+    assert_equal 'a', buf.get_string
+  end
+
+  def test_set_string_overlapped_fwd
+    str = +'0123456789'
+    IO::Buffer.for(str) do |buf|
+      buf.set_string(str, 3, 7)
+    end
+    assert_equal '0120123456', str
+  end
+
+  def test_set_string_overlapped_bwd
+    str = +'0123456789'
+    IO::Buffer.for(str) do |buf|
+      buf.set_string(str, 0, 7, 3)
+    end
+    assert_equal '3456789789', str
+  end
+
+  def test_set_string_null_destination
+    buf = IO::Buffer.new(0)
+    assert_predicate buf, :null?
+    buf.set_string('a', 0, 0)
+    assert_predicate buf, :empty?
   end
 end

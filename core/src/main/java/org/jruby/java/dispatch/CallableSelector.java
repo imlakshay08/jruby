@@ -25,6 +25,9 @@ import org.jruby.javasupport.ParameterTypes;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.cli.Options;
 import org.jruby.util.collections.IntHashMap;
+
+import static org.jruby.api.Error.runtimeError;
+import static org.jruby.api.Warn.warn;
 import static org.jruby.util.CodegenUtils.getBoxType;
 import static org.jruby.util.CodegenUtils.prettyParams;
 import static org.jruby.javasupport.Java.getFunctionalInterfaceMethod;
@@ -281,14 +284,16 @@ public class CallableSelector {
                 method = mostSpecific;
 
                 if ( ambiguous ) {
+                    var context = runtime.getCurrentContext();
+
                     if (Options.JI_AMBIGUOUS_CALLS_DEBUG.load()) {
-                        runtime.newRuntimeError(
+                        runtimeError(context,
                                 "multiple Java methods found, dumping backtrace and choosing "
                                         + ((Member) ((JavaCallable) method).accessibleObject()).getName()
                                         + prettyParams(msTypes)
                         ).printStackTrace(runtime.getErr());
                     } else {
-                        runtime.getWarnings().warn(
+                        warn(context,
                                 "multiple Java methods found, use -X" + Options.JI_AMBIGUOUS_CALLS_DEBUG.propertyName() + " for backtrace. Choosing "
                                         + ((Member) ((JavaCallable) method).accessibleObject()).getName()
                                         + prettyParams(msTypes));
@@ -788,13 +793,13 @@ public class CallableSelector {
      * @param <T> the callable type
      * @return cache usable with {@link CallableSelector}
      */
-    @Deprecated
+    @Deprecated(since = "9.0.4.0")
     public static <T extends ParameterTypes> IntHashMap<T> newCallableCache() {
         return new IntHashMap<T>(8);
     }
 
     @SuppressWarnings("unchecked")
-    @Deprecated
+    @Deprecated(since = "9.0.3.0")
     public static ParameterTypes matchingCallableArityN(Ruby runtime, Map cache, ParameterTypes[] methods, IRubyObject[] args) {
         final int signatureCode = argsHashCode(args);
         ParameterTypes method = (ParameterTypes) cache.get(signatureCode);
@@ -809,7 +814,7 @@ public class CallableSelector {
     // when there's already a cached match. Do not condense them into a single
     // method.
     @SuppressWarnings("unchecked")
-    @Deprecated
+    @Deprecated(since = "9.0.3.0")
     public static JavaCallable matchingCallableArityN(Ruby runtime, Map cache, JavaCallable[] methods, IRubyObject[] args) {
         final int signatureCode = argsHashCode(args);
         JavaCallable method = (JavaCallable) cache.get(signatureCode);
@@ -820,7 +825,7 @@ public class CallableSelector {
         return method;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.3.0")
     public static JavaCallable matchingCallableArityOne(Ruby runtime, Map cache, JavaCallable[] methods, IRubyObject arg0) {
         final int signatureCode = argsHashCode(arg0);
         JavaCallable method = (JavaCallable) cache.get(signatureCode);
@@ -831,7 +836,7 @@ public class CallableSelector {
         return method;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.3.0")
     public static JavaCallable matchingCallableArityTwo(Ruby runtime, Map cache, JavaCallable[] methods, IRubyObject arg0, IRubyObject arg1) {
         final int signatureCode = argsHashCode(arg0, arg1);
         JavaCallable method = (JavaCallable) cache.get(signatureCode);
@@ -842,7 +847,7 @@ public class CallableSelector {
         return method;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.3.0")
     public static JavaCallable matchingCallableArityThree(Ruby runtime, Map cache, JavaCallable[] methods, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2) {
         final int signatureCode = argsHashCode(arg0, arg1, arg2);
         JavaCallable method = (JavaCallable) cache.get(signatureCode);
@@ -853,7 +858,7 @@ public class CallableSelector {
         return method;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.3.0")
     public static JavaCallable matchingCallableArityFour(Ruby runtime, Map cache, JavaCallable[] methods, IRubyObject arg0, IRubyObject arg1, IRubyObject arg2, IRubyObject arg3) {
         final int signatureCode = argsHashCode(arg0, arg1, arg2, arg3);
         JavaCallable method = (JavaCallable) cache.get(signatureCode);

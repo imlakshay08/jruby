@@ -38,7 +38,7 @@ public class ConvertBytes {
         this.base = base;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.0.0")
     public ConvertBytes(Ruby runtime, ByteList str, int base, boolean badcheck, boolean is19) {
         this(runtime, str, base, badcheck);
     }
@@ -115,14 +115,51 @@ public class ConvertBytes {
         return longToByteList(i, radix, upper ? UPPER_DIGITS : LOWER_DIGITS).bytes();
     }
 
+    /**
+     * Produce a new ByteList of the given long as a string in radix 10.
+     * @param i
+     * @return
+     */
     public static final ByteList longToByteList(long i) {
         return longToByteListSimple(i);
     }
 
+    /**
+     * Produce a new ByteList of the given long as a string in the given radix.
+     *
+     * @param i
+     * @param radix
+     * @return
+     */
     public static final ByteList longToByteList(long i, int radix) {
         if (radix == 10) return longToByteListSimple(i);
 
         return longToByteList(i, radix, LOWER_DIGITS);
+    }
+
+    /**
+     * Produce a ByteList of the radix 10 string form of the given long, possibly returning a cached instance for
+     * certain ranges. The result is suitable for places where transient ByteList are immediately appended into another
+     * buffer.
+     *
+     * @param i
+     * @return
+     */
+    public static final ByteList longToByteListCached(long i) {
+        if (i >= -256 && i < 256) return byteToSharedByteList((short) i);
+        return longToByteListSimple(i);
+    }
+
+    /**
+     * Return a cached ByteList for values -256..255. Any values outside this range are not cached and use of this
+     * method should be guarded appropriately. A short parameter is used to accommodate unsigned byte values 128..255.
+     * @param i
+     * @return
+     */
+    public static final ByteList byteToSharedByteList(short i) {
+        assert i >= -256 && i < 256 : "only -256 to 255 bytelists are cached";
+
+        return BYTE_RANGE_STRINGS[i + 256];
     }
 
     public static final void longIntoString(RubyString string, long i) {
@@ -324,17 +361,14 @@ public class ConvertBytes {
         return new ConvertBytes(runtime, str, base, badcheck).byteListToInum(exception);
     }
 
+    // MRI: rb_str_convert_to_inum
     public static RubyInteger byteListToInum(Ruby runtime, ByteList str, int base, boolean badcheck) {
         return (RubyInteger) byteListToInum(runtime, str, base, badcheck, true);
     }
 
+    // MRI: rb_str_convert_to_inum
     public static RubyInteger byteListToInum(Ruby runtime, ByteList str, int off, int end, int base, boolean badcheck) {
         return (RubyInteger) new ConvertBytes(runtime, str, off, end, base, badcheck).byteListToInum(true);
-    }
-
-    @Deprecated
-    public static RubyInteger byteListToInum19(Ruby runtime, ByteList str, int base, boolean badcheck) {
-        return byteListToInum(runtime, str, base, badcheck);
     }
 
     private final static byte[] conv_digit = new byte[128];
@@ -374,6 +408,15 @@ public class ConvertBytes {
         spaceOrUnderscore['\r'] = true;
         spaceOrUnderscore[' '] = true;
         spaceOrUnderscore['_'] = true;
+    }
+
+    private static final ByteList[] BYTE_RANGE_STRINGS;
+    static {
+        BYTE_RANGE_STRINGS = new ByteList[512];
+        for (int i = -256; i < 256; i++) {
+            ByteList bytes = new ByteList(longToCharBytes(i), USASCIIEncoding.INSTANCE, false);
+            BYTE_RANGE_STRINGS[i + 256] = bytes;
+        }
     }
 
     public static byte[] bytesToUUIDBytes(byte[] randBytes, boolean upper) {
@@ -847,7 +890,7 @@ public class ConvertBytes {
      *
      */
     private void invalidString(String type) {
-        IRubyObject s = RubyString.newString(runtime, str).inspect();
+        IRubyObject s = RubyString.newString(runtime, str).inspect(runtime.getCurrentContext());
         throw runtime.newArgumentError("invalid value for " + type + "(): " + s);
     }
 }

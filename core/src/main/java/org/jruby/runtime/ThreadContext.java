@@ -76,10 +76,14 @@ import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static org.jruby.RubyBasicObject.NEVER;
+import static org.jruby.api.Access.instanceConfig;
+import static org.jruby.api.Create.newEmptyArray;
+import static org.jruby.api.Error.typeError;
 
 public final class ThreadContext {
 
@@ -179,7 +183,7 @@ public final class ThreadContext {
      * This fields is no longer initialized, is null by default!
      * @deprecated Use {@link #getSecureRandom()} instead.
      */
-    @Deprecated
+    @Deprecated(since = "9.1.0.0")
     public transient SecureRandom secureRandom;
 
     private static boolean tryPreferredPRNG = true;
@@ -235,9 +239,7 @@ public final class ThreadContext {
         this.fals = runtime.getFalse();
         this.savedExcInLambda = null;
 
-        if (runtime.getInstanceConfig().isProfilingEntireRun()) {
-            startProfiling();
-        }
+        if (instanceConfig(this).isProfilingEntireRun()) startProfiling();
 
         this.runtimeCache = runtime.getRuntimeCache();
         this.sites = runtime.sites;
@@ -290,6 +292,10 @@ public final class ThreadContext {
     public IRubyObject setErrorInfo(IRubyObject errorInfo) {
         thread.setErrorInfo(errorInfo);
         return errorInfo;
+    }
+
+    public void clearErrorInfo() {
+        thread.setErrorInfo(nil);
     }
 
     public Throwable getSavedExceptionInLambda() {
@@ -436,7 +442,7 @@ public final class ThreadContext {
         catchStack = newCatchStack;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.6.0")
     public void pushCatch(RubyContinuation.Continuation catchTarget) {
         pushCatch((CatchThrow) catchTarget);
     }
@@ -638,30 +644,33 @@ public final class ThreadContext {
     /**
      * MRI: rb_reg_last_match
      */
+    @JIT
     public IRubyObject last_match() {
-        return RubyRegexp.nth_match(0, frameStack[frameIndex].getBackRef(nil));
+        return RubyRegexp.nth_match(this, 0, frameStack[frameIndex].getBackRef(nil));
     }
 
     /**
      * MRI: rb_reg_match_pre
      */
+    @JIT
     public IRubyObject match_pre() {
-        return RubyRegexp.match_pre(frameStack[frameIndex].getBackRef(nil));
+        return RubyRegexp.match_pre(this, frameStack[frameIndex].getBackRef(nil));
     }
-
 
     /**
      * MRI: rb_reg_match_post
      */
+    @JIT
     public IRubyObject match_post() {
-        return RubyRegexp.match_post(frameStack[frameIndex].getBackRef(nil));
+        return RubyRegexp.match_post(this, frameStack[frameIndex].getBackRef(nil));
     }
 
     /**
      * MRI: rb_reg_match_last
      */
+    @JIT
     public IRubyObject match_last() {
-        return RubyRegexp.match_last(frameStack[frameIndex].getBackRef(nil));
+        return RubyRegexp.match_last(this, frameStack[frameIndex].getBackRef(nil));
     }
 
     /**
@@ -784,10 +793,6 @@ public final class ThreadContext {
         return backtrace[backtraceIndex].line;
     }
 
-    public String getFileAndLine() {
-        return "" + getFile() + ":" + getLine();
-    }
-
     public void setLine(int line) {
         backtrace[backtraceIndex].line = line;
     }
@@ -796,6 +801,10 @@ public final class ThreadContext {
         BacktraceElement b = backtrace[backtraceIndex];
         b.filename = file;
         b.line = line;
+    }
+
+    public String getFileAndLine() {
+        return "" + backtrace[backtraceIndex].filename + ":" + (backtrace[backtraceIndex].line + 1);
     }
 
     public Visibility getCurrentVisibility() {
@@ -845,9 +854,9 @@ public final class ThreadContext {
     /**
      * Used by the evaluator and the compiler to look up a constant by name
      */
-    @Deprecated
+    @Deprecated(since = "1.7.2")
     public IRubyObject getConstant(String internedName) {
-        return getCurrentStaticScope().getConstant(internedName);
+        return getCurrentStaticScope().getConstant(this, internedName);
     }
 
     /**
@@ -857,7 +866,7 @@ public final class ThreadContext {
      * @param sb the StringBuilder to which to render the backtrace
      */
     public void renderCurrentBacktrace(StringBuilder sb) {
-        TraceType traceType = runtime.getInstanceConfig().getTraceType();
+        TraceType traceType = instanceConfig(this).getTraceType();
         BacktraceData backtraceData = traceType.getBacktrace(this);
         traceType.getFormat().renderBacktrace(backtraceData.getBacktrace(runtime), sb, false);
     }
@@ -907,16 +916,31 @@ public final class ThreadContext {
         int traceLength = safeLength(level, length, fullTrace);
 
         // MRI started returning [] instead of nil some time after 1.9 (#4891)
-        if (traceLength < 0) return runtime.newEmptyArray();
+        if (traceLength < 0) return newEmptyArray(this);
 
-        RubyArray backTrace = RubyThread.Location.newLocationArray(runtime, fullTrace, level, traceLength);
+        var backTrace = RubyThread.Location.newLocationArray(runtime, fullTrace, level, traceLength);
         if (RubyInstanceConfig.LOG_CALLERS) TraceType.logCaller(backTrace);
         return backTrace;
+    }
+
+    /**
+     * Like {@link #createCallerLocations(int, Integer, Stream)} but accepts a lambda to yield each location and yields
+     * all stack elements until the loop ends or is broken early.
+     *
+     * @param stackStream the stream of StackFrame objects from JVM
+     * @param consumer the consumer of RubyThread.Location objects
+     */
+    public void eachCallerLocation(Stream<StackWalker.StackFrame> stackStream, Consumer<RubyThread.Location> consumer) {
+        eachPartialTrace(stackStream, (elt) -> consumer.accept(RubyThread.Location.newLocation(runtime, elt)));
     }
 
     private RubyStackTraceElement[] getPartialTrace(int level, Integer length, Stream<StackWalker.StackFrame> stackStream) {
         if (length != null && length == 0) return RubyStackTraceElement.EMPTY_ARRAY;
         return TraceType.Gather.CALLER.getBacktraceData(this, stackStream).getPartialBacktrace(runtime, level + length);
+    }
+
+    private void eachPartialTrace(Stream<StackWalker.StackFrame> stackStream, Consumer<RubyStackTraceElement> consumer) {
+        TraceType.Gather.CALLER.getBacktraceData(this, stackStream).yieldPartialBacktrace(runtime, (elt) -> {consumer.accept(elt); return true;});
     }
 
     private RubyStackTraceElement[] getWarnTrace(int level, Stream<StackWalker.StackFrame> stackStream) {
@@ -1357,7 +1381,7 @@ public final class ThreadContext {
     }
 
     public IRubyObject addThreadTraceFunction(IRubyObject trace_func, boolean useContextHook) {
-        if (!(trace_func instanceof RubyProc)) throw runtime.newTypeError("trace_func needs to be Proc.");
+        if (!(trace_func instanceof RubyProc)) throw typeError(this, "trace_func needs to be Proc.");
 
         TraceEventManager.CallTraceFuncHook hook;
 
@@ -1525,7 +1549,7 @@ public final class ThreadContext {
      * @return the old call info
      * @deprecated use the trivially-inlinable static version
      */
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public int resetCallInfo() {
         return resetCallInfo(this);
     }
@@ -1547,7 +1571,7 @@ public final class ThreadContext {
      * Clear call info state (set to 0).
      * @deprecated use the trivially-inlinable static version
      */
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public void clearCallInfo() {
         clearCallInfo(this);
     }
@@ -1564,7 +1588,7 @@ public final class ThreadContext {
         return (callInfo & CALL_KEYWORD) != 0;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.3.0.0")
     public IRubyObject setBackRef(IRubyObject match) {
         if (match.isNil()) return clearBackRef();
 

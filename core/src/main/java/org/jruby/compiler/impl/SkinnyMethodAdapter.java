@@ -47,10 +47,6 @@ import org.objectweb.asm.util.Textifier;
 import org.objectweb.asm.util.TraceMethodVisitor;
 import static org.objectweb.asm.Opcodes.*;
 
-/**
- *
- * @author headius
- */
 public final class SkinnyMethodAdapter extends MethodVisitor {
     private final static boolean DEBUG;
 
@@ -973,13 +969,13 @@ public final class SkinnyMethodAdapter extends MethodVisitor {
     }
 
     @Override
-    @Deprecated
+    @Deprecated(since = "9.1.6.0")
     public void visitMethodInsn(int arg0, String arg1, String arg2, String arg3) {
         getMethodVisitor().visitMethodInsn(arg0, arg1, arg2, arg3);
     }
 
     @Override
-    @Deprecated
+    @Deprecated(since = "9.1.6.0")
     public void visitMethodInsn(int arg0, String arg1, String arg2, String arg3, boolean arg4) {
         getMethodVisitor().visitMethodInsn(arg0, arg1, arg2, arg3, arg4);
     }

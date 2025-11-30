@@ -62,7 +62,7 @@ public interface FileResource {
     // For transition to file resources only. Implementations should return
     // JRubyFile if this resource is backed by one, and NOT_FOUND JRubyFile
     // otherwise.
-    @Deprecated
+    @Deprecated(since = "9.2.1.0")
     default JRubyFile hackyGetJRubyFile() {
         try {
             return unwrap(JRubyFile.class);
@@ -83,6 +83,7 @@ public interface FileResource {
      * @return just opened InputStream
      * @throws ResourceException is the file does not exists or if the resource is a directory
      */
+    @Deprecated(since = "9.4-")
     default InputStream inputStream() throws ResourceException {
         if (!exists()) {
             throw new ResourceException.NotFound(absolutePath());
@@ -117,6 +118,7 @@ public interface FileResource {
      * @return channel
      * @throws ResourceException
      */
+    @Deprecated(since = "9.4-")
     default Channel openChannel(ModeFlags flags, int perm) throws ResourceException {
         try {
             return openChannel(flags.getFlags(), perm);

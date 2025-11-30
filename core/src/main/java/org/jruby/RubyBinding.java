@@ -45,15 +45,18 @@ import org.jruby.runtime.DynamicScope;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.Visibility;
 import org.jruby.runtime.builtin.IRubyObject;
-import org.jruby.util.TypeConverter;
+import org.jruby.runtime.marshal.DataType;
 
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Define.defineClass;
+import static org.jruby.api.Error.nameError;
 import static org.jruby.util.RubyStringBuilder.str;
 
-/**
- * @author  jpetersen
- */
 @JRubyClass(name="Binding")
-public class RubyBinding extends RubyObject {
+public class RubyBinding extends RubyObject implements DataType {
     private Binding binding;
 
     public RubyBinding(Ruby runtime, RubyClass rubyClass, Binding binding) {
@@ -66,16 +69,12 @@ public class RubyBinding extends RubyObject {
         super(runtime, rubyClass);
     }
 
-    public static RubyClass createBindingClass(Ruby runtime) {
-        RubyClass bindingClass = runtime.defineClass("Binding", runtime.getObject(), RubyBinding::new);
-
-        bindingClass.setClassIndex(ClassIndex.BINDING);
-        bindingClass.setReifiedClass(RubyBinding.class);
-        
-        bindingClass.defineAnnotatedMethods(RubyBinding.class);
-        bindingClass.getSingletonClass().undefineMethod("new");
-        
-        return bindingClass;
+    public static RubyClass createBindingClass(ThreadContext context, RubyClass Object) {
+        return defineClass(context, "Binding", Object, RubyBinding::new).
+                reifiedClass(RubyBinding.class).
+                classIndex(ClassIndex.BINDING).
+                defineMethods(context, RubyBinding.class).
+                tap(c -> c.singletonClass(context).undefMethods(context, "new"));
     }
 
     public Binding getBinding() {
@@ -88,12 +87,12 @@ public class RubyBinding extends RubyObject {
         return new RubyBinding(runtime, runtime.getBinding(), binding);
     }
 
-    @Deprecated
+    @Deprecated(since = "1.2")
     public static RubyBinding newBinding(Ruby runtime) {
         return newBinding(runtime, runtime.getCurrentContext().currentBinding());
     }
 
-    @Deprecated
+    @Deprecated(since = "1.2")
     public static RubyBinding newBinding(Ruby runtime, IRubyObject self) {
        return newBinding(runtime, runtime.getCurrentContext().currentBinding(self));
     }
@@ -108,15 +107,16 @@ public class RubyBinding extends RubyObject {
 
     @JRubyMethod
     public IRubyObject dup(ThreadContext context) {
-        return newBinding(context.runtime, binding.dup(context));
+        RubyBinding newBinding = newBinding(context.runtime, binding.dup(context));
+
+        copyInstanceVariablesInto(newBinding);
+
+        return newBinding;
     }
 
     @JRubyMethod(name = "initialize_copy", visibility = Visibility.PRIVATE)
-    @Override
-    public IRubyObject initialize_copy(IRubyObject other) {
-        RubyBinding otherBinding = (RubyBinding)other;
-        
-        binding = otherBinding.binding.clone();
+    public IRubyObject initialize_copy(ThreadContext context, IRubyObject other) {
+        binding = ((RubyBinding) other).binding.clone();
         
         return this;
     }
@@ -142,7 +142,7 @@ public class RubyBinding extends RubyObject {
     @JRubyMethod(name = "local_variable_defined?")
     public IRubyObject local_variable_defined_p(ThreadContext context, IRubyObject symbol) {
         String id = checkLocalId(context, symbol);
-        return RubyBoolean.newBoolean(context, binding.getEvalScope(context.runtime).getStaticScope().isDefined(id) != -1);
+        return asBoolean(context, binding.getEvalScope(context.runtime).getStaticScope().isDefined(id) != -1);
     }
 
     @JRubyMethod
@@ -151,7 +151,7 @@ public class RubyBinding extends RubyObject {
         DynamicScope evalScope = binding.getEvalScope(context.runtime);
         int slot = evalScope.getStaticScope().isDefined(id);
 
-        if (slot == -1) throw context.runtime.newNameError(str(context.runtime, "local variable `", symbol, "' not defined for " + inspect()), symbol);
+        if (slot == -1) throw nameError(context, str(context.runtime, "local variable '", symbol, "' not defined for " + inspect(context)), symbol);
 
         return evalScope.getValueOrNil(slot & 0xffff, slot >> 16, context.nil);
     }
@@ -175,16 +175,14 @@ public class RubyBinding extends RubyObject {
         String id = RubySymbol.idStringFromObject(context, obj);
 
         if (!RubyLexer.isIdentifierChar(id.charAt(0))) {
-            throw context.runtime.newNameError(str(context.runtime, "wrong local variable name `", obj, "' for ", this), id);
+            throw nameError(context, str(context.runtime, "wrong local variable name '", obj, "' for ", this), id);
         }
 
         return id;
     }
     @JRubyMethod
     public IRubyObject local_variables(ThreadContext context) {
-        Ruby runtime = context.runtime;
-
-        return binding.getEvalScope(runtime).getStaticScope().getLocalVariables(runtime);
+        return binding.getEvalScope(context.runtime).getStaticScope().getLocalVariables(context);
     }
 
     @JRubyMethod(name = "receiver")
@@ -194,9 +192,8 @@ public class RubyBinding extends RubyObject {
 
     @JRubyMethod
     public IRubyObject source_location(ThreadContext context) {
-        Ruby runtime = context.runtime;
-        IRubyObject filename = runtime.newString(binding.getFile()).freeze(context);
-        RubyFixnum line = runtime.newFixnum(binding.getLine() + 1); /* zero-based */
-        return runtime.newArray(filename, line);
+        IRubyObject filename = newString(context, binding.getFile()).freeze(context);
+        RubyFixnum line = asFixnum(context, binding.getLine() + 1); /* zero-based */
+        return newArray(context, filename, line);
     }
 }

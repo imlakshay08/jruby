@@ -32,6 +32,8 @@ import org.jcodings.specific.USASCIIEncoding;
 import org.jcodings.specific.UTF8Encoding;
 import org.jruby.Ruby;
 
+import static org.jruby.api.Error.argumentError;
+
 public class RegexpSupport {
 
     public enum ErrorMode {RAISE, PREPROCESS, DESC}
@@ -175,41 +177,59 @@ public class RegexpSupport {
     public static int raisePreprocessError(Ruby runtime, ByteList str, String err, ErrorMode mode) {
         switch (mode) {
             case RAISE:
-                raiseRegexpError19(runtime, str, str.getEncoding(), RegexpOptions.NULL_OPTIONS, err);
+                raiseRegexpError(runtime, str, str.getEncoding(), RegexpOptions.NULL_OPTIONS, err);
             case PREPROCESS:
-                throw runtime.newArgumentError("regexp preprocess failed: " + err);
+                throw argumentError(runtime.getCurrentContext(), "regexp preprocess failed: " + err);
             case DESC:
                 // silent ?
         }
         return 0;
     }
 
-    // rb_enc_reg_raise
+    @Deprecated(since = "10.0.0.0")
     public static void raiseRegexpError19(Ruby runtime, ByteList bytes, Encoding enc, RegexpOptions options, String err) {
+        raiseRegexpError(runtime, bytes, enc, options, err);
+    }
+
+    // rb_enc_reg_raise
+    public static void raiseRegexpError(Ruby runtime, ByteList bytes, Encoding enc, RegexpOptions options, String err) {
         // TODO: we loose encoding information here, fix it
-        throw runtime.newRegexpError(err + ": " + regexpDescription19(runtime, bytes, options, enc));
+        throw runtime.newRegexpError(err + ": " + regexpDescription(runtime, bytes, options, enc));
+    }
+
+    @Deprecated(since = "10.0.0.0")
+    public static ByteList regexpDescription19(Ruby runtime, ByteList bytes, RegexpOptions options, Encoding enc) {
+        return regexpDescription(runtime, bytes, options, enc);
     }
 
     // rb_enc_reg_error_desc
-    public static ByteList regexpDescription19(Ruby runtime, ByteList bytes, RegexpOptions options, Encoding enc) {
-        return regexpDescription19(runtime, bytes.getUnsafeBytes(), bytes.getBegin(), bytes.getRealSize(), options, enc);
+    public static ByteList regexpDescription(Ruby runtime, ByteList bytes, RegexpOptions options, Encoding enc) {
+        byte[] s = bytes.getUnsafeBytes();
+        int start = bytes.getBegin();
+        int len = bytes.getRealSize();
+        return regexpDescription(runtime, s, start, len, options, enc);
     }
 
-    private static ByteList regexpDescription19(Ruby runtime, byte[] s, int start, int len, RegexpOptions options, Encoding enc) {
+    private static ByteList regexpDescription(Ruby runtime, byte[] s, int start, int len, RegexpOptions options, Encoding enc) {
         ByteList description = new ByteList();
         description.setEncoding(enc);
         description.append((byte)'/');
         Encoding resultEnc = runtime.getDefaultInternalEncoding();
         if (resultEnc == null) resultEnc = runtime.getDefaultExternalEncoding();
 
-        appendRegexpString19(runtime, description, s, start, len, enc, resultEnc);
+        appendRegexpString(runtime, description, s, start, len, enc, resultEnc);
         description.append((byte)'/');
         appendOptions(description, options);
         if (options.isEncodingNone()) description.append((byte) 'n');
         return description;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static void appendRegexpString19(Ruby runtime, ByteList to, byte[] bytes, int start, int len, Encoding enc, Encoding resEnc) {
+        appendRegexpString(runtime, to, bytes, start, len, enc, resEnc);
+    }
+
+    public static void appendRegexpString(Ruby runtime, ByteList to, byte[] bytes, int start, int len, Encoding enc, Encoding resEnc) {
         int p = start;
         int end = p + len;
         boolean needEscape = false;
@@ -389,10 +409,9 @@ public class RegexpSupport {
         byte[]chBuf = new byte[enc.maxLength()];
         int chLen = 0;
 
-        p = readEscapedByte(runtime, chBuf, chLen++, bytes, p, end, str, mode);
-        while (chLen < enc.maxLength() && StringSupport.MBCLEN_NEEDMORE_P(StringSupport.preciseLength(enc, chBuf, 0, chLen))) {
+        do {
             p = readEscapedByte(runtime, chBuf, chLen++, bytes, p, end, str, mode);
-        }
+        } while (chLen < enc.maxLength() && StringSupport.MBCLEN_NEEDMORE_P(StringSupport.preciseLength(enc, chBuf, 0, chLen)));
 
         int cl = StringSupport.preciseLength(enc, chBuf, 0, chLen);
         if (cl == -1) {

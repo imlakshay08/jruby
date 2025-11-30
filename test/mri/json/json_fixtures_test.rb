@@ -1,5 +1,5 @@
-#frozen_string_literal: false
-require 'test_helper'
+# frozen_string_literal: true
+require_relative 'test_helper'
 
 class JSONFixturesTest < Test::Unit::TestCase
   def setup

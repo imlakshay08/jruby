@@ -1,8 +1,6 @@
 package org.jruby.runtime.callsite;
 
 import org.jruby.RubyClass;
-import org.jruby.RubyFixnum;
-import org.jruby.RubyFloat;
 import org.jruby.internal.runtime.methods.DynamicMethod;
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.Block;
@@ -13,11 +11,13 @@ import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
 import static org.jruby.RubyBasicObject.getMetaClass;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.asFloat;
 
 public abstract class CachingCallSite extends CallSite {
 
     protected CacheEntry cache = CacheEntry.NULL_CACHE;
-    @Deprecated
+    @Deprecated(since = "9.2.17.0")
     protected CacheEntry builtinCache = CacheEntry.NULL_CACHE;
 
     public CachingCallSite(String methodName, CallType callType) {
@@ -58,12 +58,12 @@ public abstract class CachingCallSite extends CallSite {
 
     @Override
     public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, long fixnum) {
-        return call(context, caller, self, RubyFixnum.newFixnum(context.runtime, fixnum));
+        return call(context, caller, self, asFixnum(context, fixnum));
     }
 
     @Override
     public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, double flote) {
-        return call(context, caller, self, RubyFloat.newFloat(context.runtime, flote));
+        return call(context, caller, self, asFloat(context, flote));
     }
 
     @Override
@@ -118,70 +118,70 @@ public abstract class CachingCallSite extends CallSite {
     @Override
     public final IRubyObject callVarargs(ThreadContext context, IRubyObject caller,
         IRubyObject self, IRubyObject... args) {
-        switch (args.length) {
-            case 0: return call(context, caller, self);
-            case 1: return call(context, caller, self, args[0]);
-            case 2: return call(context, caller, self, args[0], args[1]);
-            case 3: return call(context, caller, self, args[0], args[1], args[2]);
-            default: return call(context, caller, self, args);
-        }
+        return switch (args.length) {
+            case 0 -> call(context, caller, self);
+            case 1 -> call(context, caller, self, args[0]);
+            case 2 -> call(context, caller, self, args[0], args[1]);
+            case 3 -> call(context, caller, self, args[0], args[1], args[2]);
+            default -> call(context, caller, self, args);
+        };
     }
 
     public final IRubyObject fcallVarargs(ThreadContext context,
                                          IRubyObject self, IRubyObject... args) {
-        switch (args.length) {
-            case 0: return call(context, self, self);
-            case 1: return call(context, self, self, args[0]);
-            case 2: return call(context, self, self, args[0], args[1]);
-            case 3: return call(context, self, self, args[0], args[1], args[2]);
-            default: return call(context, self, self, args);
-        }
+        return switch (args.length) {
+            case 0 -> call(context, self, self);
+            case 1 -> call(context, self, self, args[0]);
+            case 2 -> call(context, self, self, args[0], args[1]);
+            case 3 -> call(context, self, self, args[0], args[1], args[2]);
+            default -> call(context, self, self, args);
+        };
     }
 
     @Override
     public final IRubyObject callVarargs(ThreadContext context, IRubyObject caller,
         IRubyObject self, IRubyObject[] args, Block block) {
-        switch (args.length) {
-            case 0: return call(context, caller, self, block);
-            case 1: return call(context, caller, self, args[0], block);
-            case 2: return call(context, caller, self, args[0], args[1], block);
-            case 3: return call(context, caller, self, args[0], args[1], args[2], block);
-            default: return call(context, caller, self, args, block);
-        }
+        return switch (args.length) {
+            case 0 -> call(context, caller, self, block);
+            case 1 -> call(context, caller, self, args[0], block);
+            case 2 -> call(context, caller, self, args[0], args[1], block);
+            case 3 -> call(context, caller, self, args[0], args[1], args[2], block);
+            default -> call(context, caller, self, args, block);
+        };
     }
 
     public final IRubyObject fcallVarargs(ThreadContext context,
                                          IRubyObject self, IRubyObject[] args, Block block) {
-        switch (args.length) {
-            case 0: return call(context, self, self, block);
-            case 1: return call(context, self, self, args[0], block);
-            case 2: return call(context, self, self, args[0], args[1], block);
-            case 3: return call(context, self, self, args[0], args[1], args[2], block);
-            default: return call(context, self, self, args, block);
-        }
+        return switch (args.length) {
+            case 0 -> call(context, self, self, block);
+            case 1 -> call(context, self, self, args[0], block);
+            case 2 -> call(context, self, self, args[0], args[1], block);
+            case 3 -> call(context, self, self, args[0], args[1], args[2], block);
+            default -> call(context, self, self, args, block);
+        };
     }
 
     @Override
     public final IRubyObject callVarargsIter(ThreadContext context, IRubyObject caller,
         IRubyObject self, IRubyObject[] args, Block block) {
-        switch (args.length) {
-            case 0: return callIter(context, caller, self, block);
-            case 1: return callIter(context, caller, self, args[0], block);
-            case 2: return callIter(context, caller, self, args[0], args[1], block);
-            case 3: return callIter(context, caller, self, args[0], args[1], args[2], block);
-            default: return callIter(context, caller, self, args, block);
-        }
+        return switch (args.length) {
+            case 0 -> callIter(context, caller, self, block);
+            case 1 -> callIter(context, caller, self, args[0], block);
+            case 2 -> callIter(context, caller, self, args[0], args[1], block);
+            case 3 -> callIter(context, caller, self, args[0], args[1], args[2], block);
+            default -> callIter(context, caller, self, args, block);
+        };
     }
 
     public final IRubyObject fcallVarargsIter(ThreadContext context,
                                              IRubyObject self, IRubyObject[] args, Block block) {
-        switch (args.length) {
-            case 0: return callIter(context, self, self, block);
-            case 1: return callIter(context, self, self, args[0], block);
-            case 2: return callIter(context, self, self, args[0], args[1], block);
-            case 3: return callIter(context, self, self, args[0], args[1], args[2], block);
-            default: return callIter(context, self, self, args, block);
-        }
+        return switch (args.length) {
+            case 0 -> callIter(context, self, self, block);
+            case 1 -> callIter(context, self, self, args[0], block);
+            case 2 -> callIter(context, self, self, args[0], args[1], block);
+            case 3 -> callIter(context, self, self, args[0], args[1], args[2], block);
+            default -> callIter(context, self, self, args, block);
+        };
     }
 
     @Override
@@ -400,7 +400,7 @@ public abstract class CachingCallSite extends CallSite {
         return cacheAndGet(selfType, methodName);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.8.0")
     public final CacheEntry retrieveCache(RubyClass selfType, String methodName) {
         // This must be retrieved *once* to avoid racing with other threads.
         CacheEntry cache = this.cache;
@@ -425,7 +425,7 @@ public abstract class CachingCallSite extends CallSite {
         return retrieveCache(selfType).method.isBuiltin();
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.8.0")
     private CacheEntry cacheAndGet(RubyClass selfType, String methodName) {
         CacheEntry entry = selfType.searchWithCache(methodName);
         if (!entry.method.isUndefined()) {

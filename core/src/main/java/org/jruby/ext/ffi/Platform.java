@@ -30,17 +30,17 @@ package org.jruby.ext.ffi;
 
 import java.nio.ByteOrder;
 import java.util.regex.Pattern;
-import org.jruby.Ruby;
-import org.jruby.RubyBoolean;
+
 import org.jruby.RubyModule;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.SafePropertyAccessor;
 
-/**
- *
- */
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.newString;
+
 public class Platform {
 
     private static final java.util.Locale LOCALE = java.util.Locale.ENGLISH;
@@ -275,7 +275,7 @@ public class Platform {
         return CPU;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public final int getJavaMajorVersion() {
         return org.jruby.platform.Platform.JAVA_VERSION;
     }
@@ -290,45 +290,43 @@ public class Platform {
                 && CPU != CPU.UNKNOWN
                 && (addressSize == 32 || addressSize == 64);
     }
-    public static void createPlatformModule(Ruby runtime, RubyModule ffi) {
-        RubyModule module = ffi.defineModuleUnder("Platform");
+    public static void createPlatformModule(ThreadContext context, RubyModule FFI) {
         Platform platform = Platform.getPlatform();
-        OS_TYPE os = platform.getOS();
-        module.defineConstant("ADDRESS_SIZE", runtime.newFixnum(platform.addressSize));
-        module.defineConstant("LONG_SIZE", runtime.newFixnum(platform.longSize));
-        module.defineConstant("LONG_DOUBLE_SIZE", runtime.newFixnum(128));
-        module.defineConstant("BYTE_ORDER", runtime.newFixnum(BYTE_ORDER));
-        module.defineConstant("BIG_ENDIAN", runtime.newFixnum(BIG_ENDIAN));
-        module.defineConstant("LITTLE_ENDIAN", runtime.newFixnum(LITTLE_ENDIAN));
-        if (OS == OS_TYPE.LINUX) {
-            module.defineConstant("GNU_LIBC", runtime.newString(LIBC));
-        }
-        module.defineAnnotatedMethods(Platform.class);
+        var module = FFI.defineModuleUnder(context, "Platform").
+                defineMethods(context, Platform.class).
+                defineConstant(context, "ADDRESS_SIZE", asFixnum(context, platform.addressSize)).
+                defineConstant(context, "LONG_SIZE", asFixnum(context, platform.longSize)).
+                defineConstant(context, "LONG_DOUBLE_SIZE", asFixnum(context, 128)).
+                defineConstant(context, "BYTE_ORDER", asFixnum(context, BYTE_ORDER)).
+                defineConstant(context, "BIG_ENDIAN", asFixnum(context, BIG_ENDIAN)).
+                defineConstant(context, "LITTLE_ENDIAN", asFixnum(context, LITTLE_ENDIAN));
+
+        if (OS == OS_TYPE.LINUX) module.defineConstant(context, "GNU_LIBC", newString(context, LIBC));
     }
 
     @JRubyMethod(name = "windows?", module=true)
     public static IRubyObject windows_p(ThreadContext context, IRubyObject recv) {
-        return RubyBoolean.newBoolean(context, OS == OS.WINDOWS);
+        return asBoolean(context, OS == OS.WINDOWS);
     }
     @JRubyMethod(name = "mac?", module=true)
     public static IRubyObject mac_p(ThreadContext context, IRubyObject recv) {
-        return RubyBoolean.newBoolean(context, OS == OS.DARWIN);
+        return asBoolean(context, OS == OS.DARWIN);
     }
     @JRubyMethod(name = "unix?", module=true)
     public static IRubyObject unix_p(ThreadContext context, IRubyObject recv) {
-        return RubyBoolean.newBoolean(context, Platform.getPlatform().isUnix());
+        return asBoolean(context, Platform.getPlatform().isUnix());
     }
     @JRubyMethod(name = "bsd?", module=true)
     public static IRubyObject bsd_p(ThreadContext context, IRubyObject recv) {
-        return RubyBoolean.newBoolean(context, Platform.getPlatform().isBSD());
+        return asBoolean(context, Platform.getPlatform().isBSD());
     }
     @JRubyMethod(name = "linux?", module=true)
     public static IRubyObject linux_p(ThreadContext context, IRubyObject recv) {
-        return RubyBoolean.newBoolean(context, OS == OS.LINUX);
+        return asBoolean(context, OS == OS.LINUX);
     }
     @JRubyMethod(name = "solaris?", module=true)
     public static IRubyObject solaris_p(ThreadContext context, IRubyObject recv) {
-        return RubyBoolean.newBoolean(context, OS == OS.SOLARIS);
+        return asBoolean(context, OS == OS.SOLARIS);
     }
 
     /**

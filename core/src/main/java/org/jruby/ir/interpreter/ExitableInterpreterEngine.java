@@ -37,8 +37,10 @@ import org.jruby.runtime.DynamicScope;
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
-import org.jruby.runtime.ivars.VariableAccessor;
 
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newEmptyArray;
+import static org.jruby.api.Error.runtimeError;
 import static org.jruby.util.RubyStringBuilder.ids;
 import static org.jruby.util.RubyStringBuilder.str;
 
@@ -85,7 +87,7 @@ public class ExitableInterpreterEngine extends InterpreterEngine {
                 // FIXME: We are forcing a boxing to a Ruby array we probably do not need but did it anyways so it matched the
                 // interface of interpreterengine (re-consider this).
                 return new ExitableReturn(
-                		context.runtime.newArray(interpreterContext.getArgs(context, self, currScope, currDynScope, temp)),
+                		newArray(context, interpreterContext.getArgs(context, self, currScope, currDynScope, temp)),
         				((CallBase)instrs[ipc]).prepareBlock(context, self, currScope, currDynScope, temp));
             }
 
@@ -108,11 +110,11 @@ public class ExitableInterpreterEngine extends InterpreterEngine {
                         break;
                     case CALL_OP:
                         if (profile) Profiler.updateCallSite(instr, interpreterContext.getScope(), scopeVersion);
-                        processCall(context, instr, operation, currDynScope, currScope, temp, self);
+                        processCall(context, instr, operation, currDynScope, currScope, temp, self, name);
                         break;
                     case RET_OP:
                         processReturnOp(context, block, instr, operation, currDynScope, temp, self, currScope);
-                        return new ExitableReturn(context.runtime.newArray(), Block.NULL_BLOCK);
+                        return new ExitableReturn(newEmptyArray(context), Block.NULL_BLOCK);
                     case BRANCH_OP:
                         switch (operation) {
                             case JUMP:
@@ -165,7 +167,7 @@ public class ExitableInterpreterEngine extends InterpreterEngine {
         }
 
         // Control should never get here!
-        throw context.runtime.newRuntimeError("BUG: interpreter fell through to end unexpectedly");
+        throw runtimeError(context, "BUG: interpreter fell through to end unexpectedly");
     }
 
     protected static void processOtherOp(ThreadContext context, Block block, Instr instr, Operation operation, DynamicScope currDynScope,

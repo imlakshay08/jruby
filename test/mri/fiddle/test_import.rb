@@ -22,7 +22,6 @@ module Fiddle
     extern "int fprintf(FILE*, char*)" rescue nil
     extern "int gettimeofday(timeval*, timezone*)" rescue nil
 
-    BoundQsortCallback = bind("void *bound_qsort_callback(void*, void*)"){|ptr1,ptr2| ptr1[0] <=> ptr2[0]}
     Timeval = struct [
       "long tv_sec",
       "long tv_usec",
@@ -59,11 +58,6 @@ module Fiddle
         ]
       }
     ]
-
-    CallCallback = bind("void call_callback(void*, void*)"){ | ptr1, ptr2|
-      f = Function.new(ptr1.to_i, [TYPE_VOIDP], TYPE_VOID)
-      f.call(ptr2)
-    }
   end
 
   class TestImport < TestCase
@@ -130,19 +124,40 @@ module Fiddle
         name = $1.sub(/P\z/,"*").gsub(/_(?!T\z)/, " ").downcase
         type_name = name
       end
+      type_name = "unsigned #{$1}" if type_name =~ /\Au(long|short|char|int|long long)\z/
+
       define_method("test_sizeof_#{name}") do
         assert_equal(size, Fiddle::Importer.sizeof(type_name), type)
+      end
+    end
+
+    # Assert that the unsigned constants are equal to the "negative" signed ones
+    # for backwards compatibility
+    def test_unsigned_equals_negative_signed
+      Fiddle.constants.grep(/\ATYPE_(?!VOID|VARIADIC\z)(U.*)/) do |unsigned|
+        assert_equal(-Fiddle.const_get(unsigned.to_s.sub(/U/, '')),
+                     Fiddle.const_get(unsigned))
+      end
+    end
+
+    def test_type_constants
+      Fiddle::Types.constants.each do |const|
+        assert_equal Fiddle::Types.const_get(const), Fiddle.const_get("TYPE_#{const}")
       end
     end
 
     def test_unsigned_result()
       d = (2 ** 31) + 1
 
-      r = LIBC.strtoul(d.to_s, 0, 0)
+      r = LIBC.strtoul(d.to_s, nil, 0)
       assert_equal(d, r)
     end
 
     def test_io()
+      if ffi_backend?
+        omit("BUILD_RUBY_PLATFORM doesn't exist in FFI backend")
+      end
+
       if( RUBY_PLATFORM != BUILD_RUBY_PLATFORM ) || !defined?(LIBC.fprintf)
         return
       end
@@ -200,7 +215,7 @@ module Fiddle
 
       keyboard_event_struct = Fiddle::Importer.struct(['unsigned int state', 'char key'])
       mouse_event_struct    = Fiddle::Importer.struct(['unsigned int button', 'unsigned short x', 'unsigned short y'])
-      event_union           = Fiddle::Importer.union([{ keboard: keyboard_event_struct, mouse: mouse_event_struct}])
+      event_union           = Fiddle::Importer.union([{ keyboard: keyboard_event_struct, mouse: mouse_event_struct}])
       assert_equal LIBC::UnionNestedStruct.size, event_union.size
     end
 
@@ -318,11 +333,12 @@ module Fiddle
 
     def test_struct_nested_struct_replace_array_element_hash()
       LIBC::StructNestedStruct.malloc(Fiddle::RUBY_FREE) do |s|
+        s.vertices[0] = nil
         s.vertices[0] = {
           position: {
             x: 10,
             y: 100,
-          }
+          },
         }
         assert_equal({
                        "position" => {
@@ -439,7 +455,7 @@ module Fiddle
         s.buff = "012345\377"
         assert_equal([0,1,2,3,4], s.num)
         assert_equal(?a.ord, s.c)
-        assert_equal([?0.ord,?1.ord,?2.ord,?3.ord,?4.ord,?5.ord,?\377.ord], s.buff)
+        assert_equal([?0.ord,?1.ord,?2.ord,?3.ord,?4.ord,?5.ord,"\xFF".ord], s.buff)
       end
     end
 
@@ -456,6 +472,10 @@ module Fiddle
     end
 
     def test_strcpy()
+      if RUBY_ENGINE == "jruby"
+        omit("Function that returns string doesn't work with JRuby")
+      end
+
       buff = +"000"
       str = LIBC.strcpy(buff, "123")
       assert_equal("123", buff)

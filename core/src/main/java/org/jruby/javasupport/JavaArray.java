@@ -34,10 +34,15 @@ package org.jruby.javasupport;
 import java.lang.reflect.Array;
 
 import org.jruby.Ruby;
+import org.jruby.RubyBasicObject;
 import org.jruby.RubyFixnum;
-import org.jruby.RubyInteger;
+import org.jruby.api.Convert;
 import org.jruby.java.util.ArrayUtils;
+import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
+
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.javasupport.Java.castToJavaObject;
 
 /**
  * Java::JavaArray wrapping is no longer used with JRuby.
@@ -46,7 +51,7 @@ import org.jruby.runtime.builtin.IRubyObject;
  *
  * @deprecated since 9.4
  */
-@Deprecated // @JRubyClass(name="Java::JavaArray", parent="Java::JavaObject")
+@Deprecated(since = "9.4.0.0") // @JRubyClass(name="Java::JavaArray", parent="Java::JavaObject")
 public class JavaArray extends JavaObject {
 
     private final JavaUtil.JavaConverter javaConverter;
@@ -61,8 +66,9 @@ public class JavaArray extends JavaObject {
         return getValue().getClass().getComponentType();
     }
 
+    @Deprecated(since = "10.0.0.0")
     public RubyFixnum length() {
-        return getRuntime().newFixnum(getLength());
+        return asFixnum(getCurrentContext(), getLength());
     }
 
     public int getLength() {
@@ -79,21 +85,18 @@ public class JavaArray extends JavaObject {
         return 17 * getValue().hashCode();
     }
 
+    @Deprecated(since = "10.0.0.0")
     public IRubyObject arefDirect(Ruby runtime, int intIndex) {
         return ArrayUtils.arefDirect(runtime, getValue(), javaConverter, intIndex);
     }
 
-    public IRubyObject aset(IRubyObject index, IRubyObject value) {
-         if (! (index instanceof RubyInteger)) {
-            throw getRuntime().newTypeError(index, getRuntime().getInteger());
-        }
-        int intIndex = (int) ((RubyInteger) index).getLongValue();
-        if (! (value instanceof JavaObject)) {
-            throw getRuntime().newTypeError("not a java object:" + value);
-        }
-        Object javaObject = ((JavaObject) value).getValue();
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject aset(IRubyObject indexArg, IRubyObject value) {
+        var context = getCurrentContext();
+        var index = Convert.castAsInteger(context, indexArg).asInt(context);
+        var javaObject = castToJavaObject(context, value).getValue();
 
-        ArrayUtils.setWithExceptionHandlingDirect(getRuntime(), javaObject, intIndex, javaObject);
+        ArrayUtils.setWithExceptionHandlingDirect(context.runtime, javaObject, index, javaObject);
 
         return value;
     }
@@ -102,32 +105,28 @@ public class JavaArray extends JavaObject {
         return ArrayUtils.asetDirect(runtime, getValue(), javaConverter, intIndex, value);
     }
 
-    public void setWithExceptionHandling(int intIndex, Object javaObject) {
-        ArrayUtils.setWithExceptionHandlingDirect(getRuntime(), getValue(), intIndex, javaObject);
+    @Deprecated(since = "10.0.0.0")
+    public void setWithExceptionHandling(ThreadContext context, int intIndex, Object javaObject) {
+        ArrayUtils.setWithExceptionHandlingDirect(context.runtime, getValue(), intIndex, javaObject);
     }
 
-    public IRubyObject afill(IRubyObject beginIndex, IRubyObject endIndex, IRubyObject value) {
-        if (! (beginIndex instanceof RubyInteger)) {
-            throw getRuntime().newTypeError(beginIndex, getRuntime().getInteger());
-        }
-        int intIndex = (int) ((RubyInteger) beginIndex).getLongValue();
-        if (! (endIndex instanceof RubyInteger)) {
-            throw getRuntime().newTypeError(endIndex, getRuntime().getInteger());
-        }
-        int intEndIndex = (int) ((RubyInteger) endIndex).getLongValue();
-        if (! (value instanceof JavaObject)) {
-            throw getRuntime().newTypeError("not a java object:" + value);
-        }
-        Object javaValue = ((JavaObject) value).getValue();
-        fillWithExceptionHandling(intIndex, intEndIndex, javaValue);
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject afill(IRubyObject beginArg, IRubyObject endArg, IRubyObject value) {
+        var context = ((RubyBasicObject) beginArg).getCurrentContext();
+        var beginIndex = Convert.castAsInteger(context, beginArg).asInt(context);
+        var endIndex = Convert.castAsInteger(context, endArg).asInt(context);
+        var javaValue = castToJavaObject(context, value).getValue();
+
+        fillWithExceptionHandling(context, beginIndex, endIndex, javaValue);
+
         return value;
     }
 
-    public final void fillWithExceptionHandling(int start, int end, Object javaValue) {
-        final Ruby runtime = getRuntime();
+    @Deprecated(since = "10.0.0.0")
+    public final void fillWithExceptionHandling(ThreadContext context, int start, int end, Object javaValue) {
         final Object array = getValue();
         for (int i = start; i < end; i++) {
-            ArrayUtils.setWithExceptionHandlingDirect(runtime, array, i, javaValue);
+            ArrayUtils.setWithExceptionHandlingDirect(context.runtime, array, i, javaValue);
         }
     }
 }

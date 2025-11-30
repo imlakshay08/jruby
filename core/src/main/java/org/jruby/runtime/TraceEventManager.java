@@ -7,6 +7,7 @@ import org.jruby.RubyBinding;
 import org.jruby.RubyInstanceConfig;
 import org.jruby.RubyModule;
 import org.jruby.RubyProc;
+import org.jruby.api.Convert;
 import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.runtime.builtin.IRubyObject;
 
@@ -18,6 +19,10 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.stream.Collectors;
+
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.*;
+import static org.jruby.api.Warn.warn;
 
 public class TraceEventManager {
     private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
@@ -62,10 +67,15 @@ public class TraceEventManager {
                     RubyEvent.RETURN
             );
 
+    @Deprecated(since = "10.0.0.0")
     public synchronized void addEventHook(EventHook hook) {
+        addEventHook(runtime.getCurrentContext(), hook);
+    }
+
+    public synchronized void addEventHook(ThreadContext context, EventHook hook) {
         if (!RubyInstanceConfig.FULL_TRACE_ENABLED && hook.needsDebug()) {
             // without full tracing, many events will not fire
-            runtime.getWarnings().warn("tracing (e.g. set_trace_func) will not capture all events without --debug flag");
+            warn(context, "tracing (e.g. set_trace_func) will not capture all events without --debug flag");
         }
 
         EventHook[] hooks = eventHooks;
@@ -143,7 +153,7 @@ public class TraceEventManager {
         if (traceFunction == null) return;
 
         hook.setTraceFunc(traceFunction);
-        addEventHook(hook);
+        addEventHook(runtime.getCurrentContext(), hook);
     }
 
     /**
@@ -162,7 +172,7 @@ public class TraceEventManager {
 
         EventHook[] newHooks = new EventHook[hooks.size()];
         eventHooks = hooks.toArray(newHooks);
-        if (hooks.size() == 0) {
+        if (hooks.isEmpty()) {
             hasEventHooks = false;
 
             disableTraceSites();
@@ -220,8 +230,7 @@ public class TraceEventManager {
             if (file == null) file = "(ruby)";
             if (type == null) type = context.nil;
 
-            Ruby runtime = context.runtime;
-            RubyBinding binding = RubyBinding.newBinding(runtime, context.currentBinding());
+            RubyBinding binding = RubyBinding.newBinding(context.runtime, context.currentBinding());
 
             // FIXME: Ultimately we should be getting proper string for this event type
             switch (eventName) {
@@ -232,15 +241,14 @@ public class TraceEventManager {
                     eventName = "c-call";
                     break;
             }
-            ;
 
             context.preTrace();
             try {
                 traceFunc.call(context, new IRubyObject[]{
-                        runtime.newString(eventName), // event name
-                        runtime.newString(file), // filename
-                        runtime.newFixnum(line), // line numbers should be 1-based
-                        name != null ? runtime.newSymbol(name) : runtime.getNil(),
+                        newString(context, eventName), // event name
+                        newString(context, file), // filename
+                        asFixnum(context, line), // line numbers should be 1-based
+                        name != null ? Convert.asSymbol(context, name) : context.nil,
                         binding,
                         type
                 });

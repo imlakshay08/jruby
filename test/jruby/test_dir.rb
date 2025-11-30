@@ -208,9 +208,21 @@ class TestDir < Test::Unit::TestCase
     glob_val = Dir.glob('./testDir_3/**/*tmp1') { |f| vals << f }
     assert_equal(true, glob_val.nil?)
     assert_equal(1, vals.size)
-    assert_equal(true, File.exists?(vals[0])) unless vals.empty?
+    assert_equal(true, File.exist?(vals[0])) unless vals.empty?
   ensure
     FileUtils.rm_r("testDir_3") rescue nil
+  end
+
+  def test_glob_dir
+    Dir.mkdir('testDir_4')
+    Dir.mkdir('testDir_4/a')
+    Dir.mkdir('testDir_4/b')
+    FileUtils.touch('testDir_4/file.txt')
+    assert_equal(Dir.glob('testDir_4/*/'), ['testDir_4/a/', 'testDir_4/b/'])
+    Dir.chdir("testDir_4") do
+      assert_equal(Dir.glob('*/'), ['a/', 'b/'])
+    end
+    FileUtils.rm_r("testDir_4") rescue nil
   end
 
   def test_dir_dot_does_not_throw_exception
@@ -396,7 +408,7 @@ class TestDir < Test::Unit::TestCase
 
         letters = ['C:/', 'D:/', 'E:/', 'F:/', 'C:\\', 'D:\\', 'E:\\']
         letters.each { |letter|
-          next unless File.exists?(letter)
+          next unless File.exist?(letter)
           Dir.chdir(letter)
           pwd = Dir.pwd
           Dir.chdir(slash)
@@ -602,7 +614,7 @@ class TestDir < Test::Unit::TestCase
   else
     # http://jira.codehaus.org/browse/JRUBY-1375
     def test_mkdir_on_protected_directory_fails
-      Dir.mkdir("testDir_5") unless File.exists?("testDir_5")
+      Dir.mkdir("testDir_5") unless File.exist?("testDir_5")
       File.chmod(0400, 'testDir_5')
       assert_raises(Errno::EACCES) do
         Dir.mkdir("testDir_5/another_dir")

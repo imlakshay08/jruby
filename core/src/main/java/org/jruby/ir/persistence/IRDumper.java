@@ -18,6 +18,7 @@ import org.jruby.ir.interpreter.InterpreterContext;
 import org.jruby.ir.operands.Array;
 import org.jruby.ir.operands.Bignum;
 import org.jruby.ir.operands.BuiltinClass;
+import org.jruby.ir.operands.ChilledString;
 import org.jruby.ir.operands.ClosureLocalVariable;
 import org.jruby.ir.operands.Complex;
 import org.jruby.ir.operands.CurrentScope;
@@ -32,7 +33,6 @@ import org.jruby.ir.operands.Label;
 import org.jruby.ir.operands.LocalVariable;
 import org.jruby.ir.operands.MutableString;
 import org.jruby.ir.operands.Nil;
-import org.jruby.ir.operands.NthRef;
 import org.jruby.ir.operands.NullBlock;
 import org.jruby.ir.operands.Operand;
 import org.jruby.ir.operands.Range;
@@ -172,16 +172,16 @@ public class IRDumper extends IRVisitor {
             for (BasicBlock bb : bbs) {
                 printAnsi(BLOCK_COLOR, "\nblock #" + bb.getID());
 
-                Iterable<Edge<BasicBlock>> outs;
+                Iterable<Edge<BasicBlock, CFG.EdgeType>> outs;
                 if ((outs = ic.getCFG().getOutgoingEdges(bb)) != null && outs.iterator().hasNext()) {
 
                     printAnsi(BLOCK_COLOR, " (out: ");
 
                     boolean first = true;
-                    for (Edge<BasicBlock> out : outs) {
+                    for (Edge<BasicBlock, CFG.EdgeType> out : outs) {
                         if (!first) printAnsi(BLOCK_COLOR, ", ");
                         first = false;
-                        CFG.EdgeType type = (CFG.EdgeType) out.getType();
+                        CFG.EdgeType type = out.getType();
                         BasicBlock block = out.getDestination().getOutgoingDestinationData();
                         switch (type) {
                             case EXIT:
@@ -309,6 +309,7 @@ public class IRDumper extends IRVisitor {
     public void Boolean(org.jruby.ir.operands.Boolean bool) { print(bool.isTrue() ? "t" : "f"); }
     public void BuiltinClass(BuiltinClass builtinClass) { } // FIXME: need to print enum
     public void UnboxedBoolean(UnboxedBoolean bool) { print(bool.isTrue() ? "t" : "f"); }
+    public void ChilledString(ChilledString chilled) { print(chilled.getByteList()); }
     public void ClosureLocalVariable(ClosureLocalVariable closurelocalvariable) { LocalVariable(closurelocalvariable); }
     public void CurrentScope(CurrentScope currentscope) { }
     public void Complex(Complex complex) { visit(complex.getNumber()); }
@@ -336,7 +337,6 @@ public class IRDumper extends IRVisitor {
     public void Label(Label label) { print(label.toString()); }
     public void LocalVariable(LocalVariable localvariable) { print(localvariable.getName()); }
     public void Nil(Nil nil) { }
-    public void NthRef(NthRef nthref) { print(nthref.getId()); }
     public void NullBlock(NullBlock nullblock) { }
     public void Rational(Rational rational) { print(rational.getNumerator() + "/" + rational.getDenominator()); }
     public void Range(Range range) { print(range.getBegin() + (range.isExclusive() ? "..." : "..") + range.getEnd()); }

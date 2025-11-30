@@ -18,7 +18,7 @@ module TestHelper
            # assume the parent CL of jruby-classloader has a getUrls method
            urls = JRuby.runtime.getJRubyClassLoader.parent.getURLs.collect { |u| u.path }
            urls.unshift '.'
-           exe += " -cp #{urls.join(File::PATH_SEPARATOR)} org.jruby.Main"
+           exe += " -cp #{urls.join(File::PATH_SEPARATOR)} org.jruby.main.Main"
            exe
          else
            exe = '"' + File.join(RbConfig::CONFIG['bindir'], RbConfig::CONFIG['RUBY_INSTALL_NAME'])
@@ -34,9 +34,9 @@ module TestHelper
     DEVNULL = '/dev/null'
   end
 
-  IS_JRUBY = defined?(JRUBY_VERSION) ? true : false
+  IS_JRUBY = RUBY_ENGINE == 'jruby'
 
-  if defined? JRUBY_VERSION
+  if IS_JRUBY
     arch = java.lang.System.getProperty('sun.arch.data.model')
     WINDOWS_JVM_64 = (WINDOWS && arch == '64')
   end

@@ -30,6 +30,7 @@ package org.jruby;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.function.BiConsumer;
 
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.Block;
@@ -40,6 +41,9 @@ import org.jruby.runtime.builtin.InternalVariables;
 import org.jruby.runtime.builtin.RubyJavaObject;
 import org.jruby.runtime.builtin.Variable;
 
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Error.typeError;
 import static org.jruby.runtime.invokedynamic.MethodNames.INSPECT;
 import static org.jruby.runtime.Helpers.invokedynamic;
 import static org.jruby.util.RubyStringBuilder.str;
@@ -149,9 +153,8 @@ public final class BasicObjectStub {
 
     public static String asJavaString(IRubyObject self) {
         IRubyObject asString = checkStringType(self);
-        if(!asString.isNil()) return asString.asJavaString();
-        Ruby runtime = getRuntime(self);
-        throw runtime.newTypeError(str(runtime, "", inspect(self), " is not a string"));
+        if(asString.isNil()) throw typeError(getRuntime(self).getCurrentContext(), "", inspect(self), " is not a string");
+        return asString.asJavaString();
     }
 
     public static RubyString asString(IRubyObject self) {
@@ -182,8 +185,11 @@ public final class BasicObjectStub {
     }
 
     public static RubyInteger convertToInteger(IRubyObject self, String convertMethod) {
-        IRubyObject val = TypeConverter.convertToType(self, getRuntime(self).getInteger(), convertMethod, true);
-        if (!(val instanceof RubyInteger)) throw getRuntime(self).newTypeError(getMetaClass(self).getName() + '#' + convertMethod + " should return Integer");
+        Ruby runtime = getRuntime(self);
+        IRubyObject val = TypeConverter.convertToType(self, runtime.getInteger(), convertMethod, true);
+        if (!(val instanceof RubyInteger)) {
+            throw typeError(runtime.getCurrentContext(), "", self, '#' + convertMethod + " should return Integer");
+        }
         return (RubyInteger) val;
     }
 
@@ -193,7 +199,7 @@ public final class BasicObjectStub {
 
     public static IRubyObject anyToString(IRubyObject self) {
         final RubyClass metaClass = getMetaClass(self);
-        String cname = metaClass.getRealClass().getName();
+        String cname = metaClass.getRealClass().getName(metaClass.getRuntime().getCurrentContext());
         /* 6:tags 16:addr 1:eos */
         return metaClass.runtime.newString("#<" + cname + ":0x" + Integer.toHexString(System.identityHashCode(self)) + '>');
     }
@@ -212,8 +218,11 @@ public final class BasicObjectStub {
     }
 
     public static Object toJava(IRubyObject self, Class cls) {
-        if (cls.isAssignableFrom(self.getClass())) return self;
-        throw getRuntime(self).newTypeError("could not convert " + self.getClass() + " to " + cls);
+        if (!cls.isAssignableFrom(self.getClass())) {
+            throw typeError(self.getRuntime().getCurrentContext(), "could not convert ", self, " to " + cls);
+        }
+
+        return self;
     }
 
     public static IRubyObject dup(IRubyObject self) {
@@ -222,27 +231,27 @@ public final class BasicObjectStub {
     }
 
     public static IRubyObject inspect(IRubyObject self) {
-        final Ruby runtime = getRuntime(self);
+        var context = getRuntime(self).getCurrentContext();;
         if (hasVariables(self)) {
             StringBuilder part = new StringBuilder();
-            String cname = getMetaClass(self).getRealClass().getName();
+            String cname = getMetaClass(self).getRealClass().getName(context);
             part.append("#<").append(cname).append(":0x");
             part.append(Integer.toHexString(System.identityHashCode(self)));
 
-            if (runtime.isInspecting(self)) {
+            if (context.runtime.isInspecting(self)) {
                 /* 6:tags 16:addr 1:eos */
                 part.append(" ...>");
-                return runtime.newString(part.toString());
+                return newString(context, part.toString());
             }
             try {
-                runtime.registerInspecting(self);
-                return runtime.newString(inspectObj(self, part).toString());
+                context.runtime.registerInspecting(self);
+                return newString(context, inspectObj(self, part).toString());
             } finally {
-                runtime.unregisterInspecting(self);
+                context.runtime.unregisterInspecting(self);
             }
         }
 
-        return Helpers.invoke(runtime.getCurrentContext(), self, "to_s");
+        return Helpers.invoke(context, self, "to_s");
     }
 
 
@@ -253,13 +262,16 @@ public final class BasicObjectStub {
      */
     private static StringBuilder inspectObj(IRubyObject self, StringBuilder part) {
         ThreadContext context = getRuntime(self).getCurrentContext();
-        String sep = "";
+        getInstanceVariables(self).forEachInstanceVariable(new BiConsumer<>() {
+            String sep = "";
 
-        for (Variable<IRubyObject> ivar : getInstanceVariables(self).getInstanceVariableList()) {
-            part.append(sep).append(' ').append(ivar.getName()).append('=');
-            part.append(invokedynamic(context, ivar.getValue(), INSPECT));
-            sep = ",";
-        }
+            @Override
+            public void accept(String name, IRubyObject value) {
+                part.append(sep).append(' ').append(name).append('=');
+                part.append(invokedynamic(context, value, INSPECT));
+                sep = ",";
+            }
+        });
         part.append('>');
         return part;
     }
@@ -293,11 +305,11 @@ public final class BasicObjectStub {
     }
 
     public static IRubyObject op_equal(IRubyObject self, ThreadContext context, IRubyObject other) {
-        return RubyBoolean.newBoolean(context, self == other);
+        return asBoolean(context, self == other);
     }
 
     public static IRubyObject op_eqq(IRubyObject self, ThreadContext context, IRubyObject other) {
-        return RubyBoolean.newBoolean(context, self == other);
+        return asBoolean(context, self == other);
     }
 
     public static boolean eql(IRubyObject self, IRubyObject other) {

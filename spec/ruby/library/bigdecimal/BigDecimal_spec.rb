@@ -98,7 +98,11 @@ describe "Kernel#BigDecimal" do
       BigDecimal("invalid", exception: false).should be_nil
       BigDecimal("0invalid", exception: false).should be_nil
       BigDecimal("invalid0", exception: false).should be_nil
-      BigDecimal("0.", exception: false).should be_nil
+      if BigDecimal::VERSION >= "3.1.9"
+        BigDecimal("0.", exception: false).to_i.should == 0
+      else
+        BigDecimal("0.", exception: false).should be_nil
+      end
     end
   end
 
@@ -152,8 +156,10 @@ describe "Kernel#BigDecimal" do
     BigDecimal("-12345.6E-1").should == -reference
   end
 
-  it "raises ArgumentError when Float is used without precision" do
-    -> { BigDecimal(1.0) }.should raise_error(ArgumentError)
+  version_is BigDecimal::VERSION, "3.3.0" do
+    it "allows Float without precision" do
+      BigDecimal(1.2).should == BigDecimal("1.2")
+    end
   end
 
   it "returns appropriate BigDecimal zero for signed zero" do
@@ -255,8 +261,8 @@ describe "Kernel#BigDecimal" do
     end
 
     it "produces the expected result" do
-      @c.should == BigDecimal("-0.666667e-9")
-      @c.to_s.should == "-0.666667e-9"
+      @c.round(15).should == BigDecimal("-0.666667e-9")
+      @c.round(15).to_s.should == "-0.666667e-9"
     end
 
     it "produces the correct class for other arithmetic operators" do

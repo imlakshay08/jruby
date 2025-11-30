@@ -488,6 +488,9 @@ class TestEval < Test::Unit::TestCase
       end
     end
     assert_equal(feature6609, feature6609_method)
+  ensure
+    Object.undef_method(:feature6609_block) rescue nil
+    Object.undef_method(:feature6609_method) rescue nil
   end
 
   def test_eval_using_integer_as_binding
@@ -532,6 +535,12 @@ class TestEval < Test::Unit::TestCase
     assert_equal(fname, eval("__FILE__", nil, fname, 1))
   end
 
+  def test_eval_invalid_block_exit_bug_20597
+    assert_raise(SyntaxError){eval("break if false")}
+    assert_raise(SyntaxError){eval("next if false")}
+    assert_raise(SyntaxError){eval("redo if false")}
+  end
+
   def test_eval_location_fstring
     o = Object.new
     o.instance_eval "def foo() end", "generated code"
@@ -544,8 +553,8 @@ class TestEval < Test::Unit::TestCase
   end
 
   def test_eval_location_binding
-    assert_equal(['(eval)', 1], eval("[__FILE__, __LINE__]", nil))
-    assert_equal(['(eval)', 1], eval("[__FILE__, __LINE__]", binding))
+    assert_equal(["(eval at #{__FILE__}:#{__LINE__})", 1], eval("[__FILE__, __LINE__]", nil))
+    assert_equal(["(eval at #{__FILE__}:#{__LINE__})", 1], eval("[__FILE__, __LINE__]", binding))
     assert_equal(['foo', 1], eval("[__FILE__, __LINE__]", nil, 'foo'))
     assert_equal(['foo', 1], eval("[__FILE__, __LINE__]", binding, 'foo'))
     assert_equal(['foo', 2], eval("[__FILE__, __LINE__]", nil, 'foo', 2))
@@ -602,5 +611,45 @@ class TestEval < Test::Unit::TestCase
   def test_return_in_eval_lambda
     x = orphan_lambda
     assert_equal(:ok, x.call)
+  end
+
+  def test_syntax_error_no_memory_leak
+    assert_no_memory_leak([], "#{<<~'begin;'}", "#{<<~'end;'}", rss: true)
+    begin;
+      100_000.times do
+        eval("/[/=~s")
+      rescue SyntaxError
+      else
+        raise "Expected SyntaxError to be raised"
+      end
+    end;
+
+    assert_no_memory_leak([], "#{<<~'begin;'}", "#{<<~'end;'}", rss: true)
+    begin;
+      a = 1
+
+      100_000.times do
+        eval("if a in [0, 0] | [0, a]; end")
+      rescue SyntaxError
+      else
+        raise "Expected SyntaxError to be raised"
+      end
+    end;
+  end
+
+  def test_outer_local_variable_under_gc_compact_stress
+    omit "compaction is not supported on this platform" unless GC.respond_to?(:compact)
+    omit "compaction is not supported on s390x" if /s390x/ =~ RUBY_PLATFORM
+
+    assert_separately([], <<~RUBY)
+      o = Object.new
+      def o.m = 1
+
+      GC.verify_compaction_references(expand_heap: true, toward: :empty)
+
+      EnvUtil.under_gc_compact_stress do
+        assert_equal(1, eval("o.m"))
+      end
+    RUBY
   end
 end

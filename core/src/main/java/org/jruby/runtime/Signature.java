@@ -14,6 +14,7 @@ import org.jruby.ast.UnnamedRestArgNode;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.TypeConverter;
 
+import static org.jruby.api.Error.argumentError;
 import static org.jruby.runtime.Arity.UNLIMITED_ARGUMENTS;
 
 /**
@@ -82,6 +83,27 @@ public class Signature {
     public int keyRest() { return keyRest; }
 
     /**
+     * The minimum number of parameters supplied which can fulfill a call to this signature.  This
+     * method is for calculating the public-facing arity value.
+     *
+     * @return the minimum amount of params expected.
+     */
+    public int min() {
+        return required() + (requiredKwargs > 0 ? 1 : 0);
+    }
+
+    /**
+     * The maximum number of parameters supplied which can fulfill a call to this signature.  This
+     * method is for calculating the public-facing arity value.
+     *
+     * @return the minimum amount of params expected.
+     */
+    public int max() {
+        return rest != Rest.NONE && rest != Rest.ANON ?
+                -1 : required() + opt() + (kwargs() > 0 || restKwargs() ? 1 : 0);
+    }
+
+    /**
      * Total number of keyword argument parameters.
      * @return the number of kwarg parameters
      */
@@ -120,7 +142,7 @@ public class Signature {
     public int required() { return pre + post; }
 
     // We calculate this every time but no one should be using this any more
-    @Deprecated
+    @Deprecated(since = "9.3.0.0")
     public Arity arity() {
         // NOTE: Some logic to *assign* variables still uses Arity, which treats Rest.ANON (the
         //       |a,| form) as a rest arg for destructuring purposes. However ANON does *not*
@@ -145,7 +167,7 @@ public class Signature {
         boolean hasOptionalKeywords = kwargs - requiredKwargs > 0;
         boolean optionalFromRest = rest() != Rest.NONE && rest != Rest.ANON;
 
-        if (opt() > 0 || optionalFromRest || (hasOptionalKeywords || restKwargs()) && oneForKeywords == 0) {
+        if (opt() > 0 || optionalFromRest || fixedValue == 0 && (hasOptionalKeywords || restKwargs())) {
             return -1 * (fixedValue + 1);
         }
 
@@ -186,7 +208,7 @@ public class Signature {
     }
 
     // Lossy conversion to half-support older signatures which externally use Arity but needs to be converted.
-    @Deprecated
+    @Deprecated(since = "9.3.0.0")
     public static Signature from(Arity arity) {
         switch(arity.required()) {
             case 0:
@@ -350,20 +372,25 @@ public class Signature {
         return "signature(pre=" + pre + ",opt=" + opt + ",post=" + post + ",rest=" + rest + ",kwargs=" + kwargs + ",kwreq=" + requiredKwargs + ",kwrest=" + keyRest + ")";
     }
 
+    @Deprecated(since = "10.0.0.0")
     public void checkArity(Ruby runtime, IRubyObject[] args) {
+        checkArity(runtime.getCurrentContext(), args);
+    }
+
+    public void checkArity(ThreadContext context, IRubyObject[] args) {
         if (args.length < required()) {
-            throw runtime.newArgumentError(args.length, required(), hasRest() ? UNLIMITED_ARGUMENTS : (required() + opt));
+            throw argumentError(context, args.length, required(), hasRest() ? UNLIMITED_ARGUMENTS : (required() + opt));
         }
         if (rest == Rest.NONE || rest == Rest.ANON) {
             // no rest, so we have a maximum
             if (args.length > required() + opt()) {
-                if (hasKwargs() && !TypeConverter.checkHashType(runtime, args[args.length - 1]).isNil()) {
+                if (hasKwargs() && !TypeConverter.checkHashType(context.runtime, args[args.length - 1]).isNil()) {
                     // we have kwargs and a potential kwargs hash, check with length - 1
                     if (args.length - 1 > required() + opt()) {
-                        throw runtime.newArgumentError(args.length, required(), hasRest() ? UNLIMITED_ARGUMENTS : (required() + opt));
+                        throw argumentError(context, args.length, required(), hasRest() ? UNLIMITED_ARGUMENTS : (required() + opt));
                     }
                 } else {
-                    throw runtime.newArgumentError(args.length, required(), hasRest() ? UNLIMITED_ARGUMENTS : (required() + opt));
+                    throw argumentError(context, args.length, required(), hasRest() ? UNLIMITED_ARGUMENTS : (required() + opt));
                 }
             }
         }

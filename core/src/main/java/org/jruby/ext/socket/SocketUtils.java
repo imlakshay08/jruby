@@ -35,11 +35,13 @@ import jnr.netdb.Protocol;
 import jnr.netdb.Service;
 import org.jruby.Ruby;
 import org.jruby.RubyArray;
+import org.jruby.RubyBasicObject;
 import org.jruby.RubyClass;
 import org.jruby.RubyInteger;
 import org.jruby.RubyNumeric;
 import org.jruby.RubyString;
 import org.jruby.RubySymbol;
+import org.jruby.api.Access;
 import org.jruby.ast.util.ArgsUtil;
 import org.jruby.exceptions.RaiseException;
 import org.jruby.runtime.Helpers;
@@ -72,6 +74,13 @@ import static jnr.constants.platform.ProtocolFamily.PF_INET;
 import static jnr.constants.platform.ProtocolFamily.PF_INET6;
 import static jnr.constants.platform.Sock.SOCK_DGRAM;
 import static jnr.constants.platform.Sock.SOCK_STREAM;
+import static org.jruby.api.Access.objectClass;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.toInt;
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newEmptyArray;
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Error.argumentError;
 import static org.jruby.ext.socket.Addrinfo.AI_CANONNAME;
 
 /**
@@ -79,37 +88,31 @@ import static org.jruby.ext.socket.Addrinfo.AI_CANONNAME;
  */
 public class SocketUtils {
     public static IRubyObject gethostname(ThreadContext context) {
-        Ruby runtime = context.runtime;
-
         try {
-            return RubyString.newString(context.runtime, InetAddress.getLocalHost().getHostName());
+            return newString(context, InetAddress.getLocalHost().getHostName());
 
-        } catch(UnknownHostException e) {
+        } catch (UnknownHostException e) {
 
             try {
-                return RubyString.newString(context.runtime, InetAddress.getByAddress(new byte[]{0, 0, 0, 0}).getHostName());
+                return newString(context, InetAddress.getByAddress(new byte[]{0, 0, 0, 0}).getHostName());
 
-            } catch(UnknownHostException e2) {
-                throw sockerr(runtime, "gethostname: name or service not known");
+            } catch (UnknownHostException e2) {
+                throw sockerr(context.runtime, "gethostname: name or service not known");
 
             }
         }
     }
 
     public static IRubyObject gethostbyaddr(ThreadContext context, IRubyObject[] args) {
-        Ruby runtime = context.runtime;
-        IRubyObject ret0, ret1, ret2, ret3;
+        var ret0 = newString(context, Sockaddr.addressFromString(context.runtime, args[0].convertToString().toString()).getCanonicalHostName());
+        var ret1 = newEmptyArray(context);
+        var ret2 = asFixnum(context, 2); // AF_INET
+        var ret3 = args[0];
 
-        ret0 = runtime.newString(Sockaddr.addressFromString(runtime, args[0].convertToString().toString()).getCanonicalHostName());
-        ret1 = runtime.newArray();
-        ret2 = runtime.newFixnum(2); // AF_INET
-        ret3 = args[0];
-
-        return RubyArray.newArray(runtime, ret0, ret1, ret2, ret3);
+        return RubyArray.newArray(context.runtime, ret0, ret1, ret2, ret3);
     }
 
     public static IRubyObject getservbyname(ThreadContext context, IRubyObject[] args) {
-        Ruby runtime = context.runtime;
         String name = args[0].convertToString().toString();
         String proto = args.length ==  1 ? "tcp" : args[1].convertToString().toString();
         Service service = Service.getServiceByName(name, proto);
@@ -117,66 +120,56 @@ public class SocketUtils {
 
         if (service != null) {
             port = service.getPort();
-
         } else {
-
             // MRI behavior: try to convert the name string to port directly
             try {
                 port = Integer.parseInt(name.trim());
-
             } catch (NumberFormatException nfe) {
-                throw sockerr(runtime, "no such service " + name + "/" + proto);
-
+                throw sockerr(context.runtime, "no such service " + name + "/" + proto);
             }
-
         }
 
-        return runtime.newFixnum(port);
+        return asFixnum(context, port);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.6.0")
     public static IRubyObject pack_sockaddr_in(ThreadContext context, IRubyObject port, IRubyObject host) {
         return Sockaddr.pack_sockaddr_in(context, port, host);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.6.0")
     public static RubyArray unpack_sockaddr_in(ThreadContext context, IRubyObject addr) {
         return Sockaddr.unpack_sockaddr_in(context, addr);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.6.0")
     public static IRubyObject pack_sockaddr_un(ThreadContext context, IRubyObject filename) {
         String path = filename.convertToString().asJavaString();
         return Sockaddr.pack_sockaddr_un(context, path);
     }
 
     public static IRubyObject gethostbyname(ThreadContext context, IRubyObject hostname) {
-        Ruby runtime = context.runtime;
-
         try {
             InetAddress addr = getRubyInetAddress(hostname.convertToString().toString());
-            IRubyObject ret0, ret1, ret2, ret3;
 
-            ret0 = runtime.newString(addr.getCanonicalHostName());
-            ret1 = runtime.newArray();
-            ret2 = runtime.newFixnum(AF_INET);
-            ret3 = runtime.newString(new ByteList(addr.getAddress()));
-            return RubyArray.newArray(runtime, ret0, ret1, ret2, ret3);
-
+            return RubyArray.newArray(context.runtime,
+                    newString(context, addr.getCanonicalHostName()),
+                    newEmptyArray(context),
+                    asFixnum(context, AF_INET.longValue()),
+                    newString(context, new ByteList(addr.getAddress())));
         } catch(UnknownHostException e) {
-            throw sockerr(runtime, "gethostbyname: name or service not known");
+            throw sockerr(context.runtime, "gethostbyname: name or service not known");
 
         }
     }
 
     /**
      * Ruby definition would look like:
-     *
+     * <p></p>
      * def self.getaddrinfo(host, port, family = nil, socktype = nil, protocol = nil, flags = nil, reverse_lookup = nil)
      */
     public static IRubyObject getaddrinfo(final ThreadContext context, IRubyObject[] args) {
-        final Ruby runtime = context.runtime;
-        final List<IRubyObject> l = new ArrayList<IRubyObject>();
+        final List<IRubyObject> list = new ArrayList<>();
 
         buildAddrinfoList(context, args, true, (address, port, sock, reverse, usesCanonical) -> {
             boolean is_ipv6 = address instanceof Inet6Address;
@@ -186,45 +179,38 @@ public class SocketUtils {
             if (sock != null) {
                 if (sock == SOCK_STREAM) {
                     sock_dgram = false;
-
                 } else if (sock == SOCK_DGRAM) {
                     sock_stream = false;
-
                 }
             }
 
-            IRubyObject[] c;
-
             if (sock_dgram) {
-                c = new IRubyObject[7];
-                c[0] = runtime.newString(is_ipv6 ? "AF_INET6" : "AF_INET");
-                c[1] = runtime.newFixnum(port);
-                c[2] = runtime.newString(getHostAddress(context, address, reverse));
-                c[3] = runtime.newString(address.getHostAddress());
-                c[4] = runtime.newFixnum(is_ipv6 ? PF_INET6 : PF_INET);
-                c[5] = runtime.newFixnum(SOCK_DGRAM);
-                c[6] = runtime.newFixnum(IPPROTO_UDP);
-                l.add(RubyArray.newArrayMayCopy(runtime, c));
+                list.add(RubyArray.newArrayMayCopy(context.runtime,
+                        newString(context, is_ipv6 ? "AF_INET6" : "AF_INET"),
+                        asFixnum(context, port),
+                        newString(context, getHostAddress(context, address, reverse)),
+                        newString(context, address.getHostAddress()),
+                        asFixnum(context, is_ipv6 ? PF_INET6.longValue() : PF_INET.longValue()),
+                        asFixnum(context, SOCK_DGRAM.longValue()),
+                        asFixnum(context, IPPROTO_UDP.longValue())));
             }
 
             if (sock_stream) {
-                c = new IRubyObject[7];
-                c[0] = runtime.newString(is_ipv6 ? "AF_INET6" : "AF_INET");
-                c[1] = runtime.newFixnum(port);
-                c[2] = runtime.newString(getHostAddress(context, address, reverse));
-                c[3] = runtime.newString(address.getHostAddress());
-                c[4] = runtime.newFixnum(is_ipv6 ? PF_INET6 : PF_INET);
-                c[5] = runtime.newFixnum(SOCK_STREAM);
-                c[6] = runtime.newFixnum(IPPROTO_TCP);
-                l.add(RubyArray.newArrayMayCopy(runtime, c));
+                list.add(RubyArray.newArrayMayCopy(context.runtime,
+                        newString(context, is_ipv6 ? "AF_INET6" : "AF_INET"),
+                        asFixnum(context, port),
+                        newString(context, getHostAddress(context, address, reverse)),
+                        newString(context, address.getHostAddress()),
+                        asFixnum(context, is_ipv6 ? PF_INET6.longValue() : PF_INET.longValue()),
+                        asFixnum(context, SOCK_STREAM.longValue()),
+                        asFixnum(context, IPPROTO_TCP.longValue())));
             }
         });
 
-        return runtime.newArray(l);
+        return newArray(context, list);
     }
 
     public static List<Addrinfo> getaddrinfoList(ThreadContext context, IRubyObject[] args) {
-        final Ruby runtime = context.runtime;
         final List<Addrinfo> l = new ArrayList<Addrinfo>();
 
         buildAddrinfoList(context, args, false, (address, port, sock, reverse, usesCanonical) -> {
@@ -242,7 +228,7 @@ public class SocketUtils {
             }
 
             if (sock_dgram) {
-                l.add(new Addrinfo(runtime, runtime.getClass("Addrinfo"),
+                l.add(new Addrinfo(context.runtime, Access.getClass(context, "Addrinfo"),
                         new InetSocketAddress(address, port),
                         Sock.SOCK_DGRAM,
                         SocketType.DATAGRAM,
@@ -250,7 +236,7 @@ public class SocketUtils {
             }
 
             if (sock_stream) {
-                l.add(new Addrinfo(runtime, runtime.getClass("Addrinfo"),
+                l.add(new Addrinfo(context.runtime, Access.getClass(context, "Addrinfo"),
                         new InetSocketAddress(address, port),
                         Sock.SOCK_STREAM,
                         SocketType.SOCKET,
@@ -295,18 +281,18 @@ public class SocketUtils {
             }
         }
 
-        AddressFamily addressFamily = family.isNil() ? null : addressFamilyFromArg(family);
+        AddressFamily addressFamily = family.isNil() ? null : addressFamilyFromArg(context, family);
 
-        Sock sock = socktype.isNil() ? SOCK_STREAM : sockFromArg(socktype);
+        Sock sock = socktype.isNil() ? SOCK_STREAM : sockFromArg(context, socktype);
 
         if(port instanceof RubyString) {
             port = getservbyname(context, new IRubyObject[]{port});
         }
 
-        int p = port.isNil() ? 0 : (int)port.convertToInteger().getLongValue();
+        int p = port.isNil() ? 0 : toInt(context, port);
 
         // TODO: implement flags
-        int flag = flags.isNil() ? 0 : RubyNumeric.fix2int(flags);
+        int flag = flags.isNil() ? 0 : toInt(context, flags);
 
         boolean displayCanonical = (flag & AI_CANONNAME) != 0;
 
@@ -338,33 +324,29 @@ public class SocketUtils {
     }
 
     public static IRubyObject getnameinfo(ThreadContext context, IRubyObject[] args) {
-        Ruby runtime = context.runtime;
-        int flags = args.length == 2 ? RubyNumeric.num2int(args[1]) : 0;
+        int flags = args.length == 2 ? toInt(context, args[1]) : 0;
         IRubyObject arg0 = args[0];
         String host, port;
 
-        if (arg0 instanceof RubyArray) {
-            RubyArray ary = (RubyArray) arg0;
+        if (arg0 instanceof RubyArray ary) {
             final int len = ary.size();
 
             if (len < 3 || len > 4) {
-                throw runtime.newArgumentError("array size should be 3 or 4, "+ len +" given");
+                throw argumentError(context, "array size should be 3 or 4, "+ len +" given");
             }
 
             // if array has 4 elements, third element is ignored
             port = ary.eltInternal(1).toString();
             host = len == 3 ? ary.eltInternal(2).toString() : ary.eltInternal(3).toString();
 
-        } else if (arg0 instanceof RubyString) {
-            String arg = ((RubyString) arg0).toString();
+        } else if (arg0 instanceof RubyString argS) {
+            String arg = argS.toString();
             Matcher m = STRING_IPV4_ADDRESS_PATTERN.matcher(arg);
 
             if (!m.matches()) {
                 RubyArray portAndHost = Sockaddr.unpack_sockaddr_in(context, arg0);
 
-                if (portAndHost.size() != 2) {
-                    throw runtime.newArgumentError("invalid address representation");
-                }
+                if (portAndHost.size() != 2) throw argumentError(context, "invalid address representation");
 
                 port = portAndHost.eltInternal(0).toString();
                 host = portAndHost.eltInternal(1).toString();
@@ -372,85 +354,58 @@ public class SocketUtils {
             } else if ((host = m.group(IPV4_HOST_GROUP)) == null || host.length() == 0 ||
                     (port = m.group(IPV4_PORT_GROUP)) == null || port.length() == 0) {
 
-                throw runtime.newArgumentError("invalid address string");
-
+                throw argumentError(context, "invalid address string");
             } else {
-
                 // Try IPv6
                 try {
                     InetAddress ipv6_addr = InetAddress.getByName(host);
 
-                    if (ipv6_addr instanceof Inet6Address) {
-                        host = ipv6_addr.getHostAddress();
-                    }
-
+                    if (ipv6_addr instanceof Inet6Address) host = ipv6_addr.getHostAddress();
                 } catch (UnknownHostException uhe) {
-                    throw runtime.newArgumentError("invalid address string");
-
+                    throw argumentError(context, "invalid address string");
                 }
             }
-
         } else {
-            throw runtime.newArgumentError("invalid args");
-
+            throw argumentError(context, "invalid args");
         }
 
         InetAddress addr;
 
         try {
             addr = InetAddress.getByName(host);
-
         } catch (UnknownHostException e) {
-            throw sockerr(runtime, "unknown host: "+ host);
-
+            throw sockerr(context.runtime, "unknown host: "+ host);
         }
 
-        if ((flags & NI_NUMERICHOST.intValue()) == 0) {
-            host = addr.getCanonicalHostName();
-
-        } else {
-            host = addr.getHostAddress();
-
-        }
+        host = (flags & NI_NUMERICHOST.intValue()) == 0 ? addr.getCanonicalHostName() : addr.getHostAddress();
 
         Service serv = Service.getServiceByPort(Integer.parseInt(port), null);
 
         if (serv != null) {
-
-            if ((flags & NI_NUMERICSERV.intValue()) == 0) {
-                port = serv.getName();
-
-            } else {
-                port = Integer.toString(serv.getPort());
-
-            }
-
+            port = (flags & NI_NUMERICSERV.intValue()) == 0 ? serv.getName() : Integer.toString(serv.getPort());
         }
 
-        return runtime.newArray(runtime.newString(host), runtime.newString(port));
-
+        return newArray(context, newString(context, host), newString(context, port));
     }
 
     public static IRubyObject ip_address_list(ThreadContext context) {
-        Ruby runtime = context.runtime;
-
         try {
-            RubyArray list = RubyArray.newArray(runtime);
-            RubyClass addrInfoCls = runtime.getClass("Addrinfo");
+            var list = newArray(context);
+            RubyClass addrInfoCls = Access.getClass(context, "Addrinfo");
 
             for (Enumeration<NetworkInterface> networkIfcs = NetworkInterface.getNetworkInterfaces(); networkIfcs.hasMoreElements() ; ) {
                 for (Enumeration<InetAddress> addresses = networkIfcs.nextElement().getInetAddresses(); addresses.hasMoreElements() ; ) {
-                    list.append(new Addrinfo(runtime, addrInfoCls, addresses.nextElement()));
+                    list.append(context, new Addrinfo(context.runtime, addrInfoCls, addresses.nextElement()));
                 }
             }
 
             return list;
         } catch (SocketException se) {
-            throw sockerr(runtime, se.getLocalizedMessage());
+            throw sockerr(context.runtime, se.getLocalizedMessage());
         }
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.10.0")
     public static InetAddress[] getRubyInetAddresses(ByteList address) throws UnknownHostException {
         // switched to String because the ByteLists were not comparing properly in 1.9 mode (encoding?
         // FIXME: Need to properly decode this string (see Helpers.decodeByteList)
@@ -530,7 +485,7 @@ public class SocketUtils {
     }
 
     public static RuntimeException sockerr(Ruby runtime, String msg) {
-        return RaiseException.from(runtime, runtime.getClass("SocketError"), msg);
+        return RaiseException.from(runtime, Access.getClass(runtime.getCurrentContext(), "SocketError"), msg);
     }
 
     public static RuntimeException sockerr_with_trace(Ruby runtime, String msg, StackTraceElement[] trace) {
@@ -540,21 +495,20 @@ public class SocketUtils {
         for (int i = 0, il = trace.length; i < il; i++) {
             sb.append(eol).append(trace[i].toString());
         }
-        return RaiseException.from(runtime, runtime.getClass("SocketError"), sb.toString());
+        return RaiseException.from(runtime, Access.getClass(runtime.getCurrentContext(), "SocketError"), sb.toString());
     }
 
     public static int getPortFrom(ThreadContext context, IRubyObject _port) {
         int port;
         if (_port instanceof RubyInteger) {
-            port = RubyNumeric.fix2int(_port);
+            port = toInt(context, _port);
         } else {
             IRubyObject portString = _port.convertToString();
             IRubyObject portInteger = portString.convertToInteger( "to_i");
-            port = RubyNumeric.fix2int(portInteger);
+            port = toInt(context, portInteger);
 
             if (port <= 0) {
-                port = RubyNumeric.fix2int(RubySocket.getservbyname(
-                        context, context.runtime.getObject(), new IRubyObject[]{portString}));
+                port = toInt(context, RubySocket.getservbyname(context, objectClass(context), new IRubyObject[]{portString}));
             }
         }
 
@@ -585,8 +539,8 @@ public class SocketUtils {
     private static final byte[] INADDR_ANY = new byte[] {0,0,0,0}; // 0.0.0.0
 
     // MRI: address family part of rsock_family_to_int
-    static AddressFamily addressFamilyFromArg(IRubyObject domain) {
-        IRubyObject maybeString = TypeConverter.checkStringType(domain.getRuntime(), domain);
+    static AddressFamily addressFamilyFromArg(ThreadContext context, IRubyObject domain) {
+        IRubyObject maybeString = TypeConverter.checkStringType(context.runtime, domain);
 
         if (!maybeString.isNil()) {
             domain = maybeString;
@@ -601,15 +555,15 @@ public class SocketUtils {
                 return AddressFamily.valueOf("AF_" + domainString);
             }
 
-            int domainInt = RubyNumeric.fix2int(domain);
+            int domainInt = toInt(context, domain);
             return AddressFamily.valueOf(domainInt);
         } catch (IllegalArgumentException iae) {
-            throw SocketUtils.sockerr(domain.getRuntime(), "invalid address family: " + domain);
+            throw SocketUtils.sockerr(context.runtime, "invalid address family: " + domain);
         }
     }
 
-    static Sock sockFromArg(IRubyObject type) {
-        IRubyObject maybeString = TypeConverter.checkStringType(type.getRuntime(), type);
+    static Sock sockFromArg(ThreadContext context, IRubyObject type) {
+        IRubyObject maybeString = TypeConverter.checkStringType(context.runtime, type);
 
         if (!maybeString.isNil()) {
             type = maybeString;
@@ -622,16 +576,16 @@ public class SocketUtils {
                 return Sock.valueOf("SOCK_" + typeString);
             }
 
-            int typeInt = RubyNumeric.fix2int(type);
+            int typeInt = toInt(context, type);
             return Sock.valueOf(typeInt);
         } catch (IllegalArgumentException iae) {
-            throw SocketUtils.sockerr(type.getRuntime(), "invalid socket type: " + type);
+            throw SocketUtils.sockerr(context.runtime, "invalid socket type: " + type);
         }
     }
 
     // MRI: protocol family part of rsock_family_to_int
-    static ProtocolFamily protocolFamilyFromArg(IRubyObject protocol) {
-        IRubyObject maybeString = TypeConverter.checkStringType(protocol.getRuntime(), protocol);
+    static ProtocolFamily protocolFamilyFromArg(ThreadContext context, IRubyObject protocol) {
+        IRubyObject maybeString = TypeConverter.checkStringType(context.runtime, protocol);
 
         if (!maybeString.isNil()) {
             protocol = maybeString;
@@ -645,15 +599,15 @@ public class SocketUtils {
                 return ProtocolFamily.valueOf("PF_" + protocolString);
             }
 
-            int protocolInt = RubyNumeric.fix2int(protocol);
+            int protocolInt = toInt(context, protocol);
             return ProtocolFamily.valueOf(protocolInt);
         } catch (IllegalArgumentException iae) {
-            throw SocketUtils.sockerr(protocol.getRuntime(), "invalid protocol family: " + protocol);
+            throw SocketUtils.sockerr(context.runtime, "invalid protocol family: " + protocol);
         }
     }
 
-    static Protocol protocolFromArg(IRubyObject protocol) {
-        IRubyObject maybeString = TypeConverter.checkStringType(protocol.getRuntime(), protocol);
+    static Protocol protocolFromArg(ThreadContext context, IRubyObject protocol) {
+        IRubyObject maybeString = TypeConverter.checkStringType(context.runtime, protocol);
 
         if (!maybeString.isNil()) {
             protocol = maybeString;
@@ -665,15 +619,15 @@ public class SocketUtils {
                 return Protocol.getProtocolByName(protocolString);
             }
 
-            int protocolInt = RubyNumeric.fix2int(protocol);
+            int protocolInt = toInt(context, protocol);
             return Protocol.getProtocolByNumber(protocolInt);
         } catch (IllegalArgumentException iae) {
-            throw SocketUtils.sockerr(protocol.getRuntime(), "invalid protocol: " + protocol);
+            throw SocketUtils.sockerr(context.runtime, "invalid protocol: " + protocol);
         }
     }
 
-    static SocketLevel levelFromArg(IRubyObject level) {
-        IRubyObject maybeString = TypeConverter.checkStringType(level.getRuntime(), level);
+    static SocketLevel levelFromArg(ThreadContext context, IRubyObject level) {
+        IRubyObject maybeString = TypeConverter.checkStringType(context.runtime, level);
 
         if (!maybeString.isNil()) {
             level = maybeString;
@@ -686,18 +640,16 @@ public class SocketUtils {
                 return SocketLevel.valueOf("SOL_" + levelString);
             }
 
-            return SocketLevel.valueOf(RubyNumeric.fix2int(level));
+            return SocketLevel.valueOf(toInt(context, level));
         } catch (IllegalArgumentException iae) {
-            throw SocketUtils.sockerr(level.getRuntime(), "invalid socket level: " + level);
+            throw SocketUtils.sockerr(context.runtime, "invalid socket level: " + level);
         }
     }
 
-    static SocketOption optionFromArg(IRubyObject opt) {
-        IRubyObject maybeString = TypeConverter.checkStringType(opt.getRuntime(), opt);
+    static SocketOption optionFromArg(ThreadContext context, IRubyObject opt) {
+        IRubyObject maybeString = TypeConverter.checkStringType(context.runtime, opt);
 
-        if (!maybeString.isNil()) {
-            opt = maybeString;
-        }
+        if (!maybeString.isNil()) opt = maybeString;
 
         try {
             if (opt instanceof RubyString || opt instanceof RubySymbol) {
@@ -706,26 +658,29 @@ public class SocketUtils {
                 return SocketOption.valueOf("SO_" + optString);
             }
 
-            return SocketOption.valueOf(RubyNumeric.fix2int(opt));
+            return SocketOption.valueOf(toInt(context, opt));
         } catch (IllegalArgumentException iae) {
-            throw SocketUtils.sockerr(opt.getRuntime(), "invalid socket option: " + opt);
+            throw SocketUtils.sockerr(context.runtime, "invalid socket option: " + opt);
         }
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static int portToInt(IRubyObject port) {
+        return portToInt(((RubyBasicObject) port).getCurrentContext(), port);
+    }
+
+    public static int portToInt(ThreadContext context, IRubyObject port) {
         if (port.isNil()) return 0;
 
-        Ruby runtime = port.getRuntime();
-
-        IRubyObject maybeStr = TypeConverter.checkStringType(runtime, port);
+        IRubyObject maybeStr = TypeConverter.checkStringType(context.runtime, port);
         if (!maybeStr.isNil()) {
             RubyString portStr = maybeStr.convertToString();
             Service serv = Service.getServiceByName(portStr.toString(), null);
 
             if (serv != null) return serv.getPort();
 
-            return RubyNumeric.fix2int(portStr.to_i());
+            return ((RubyInteger) portStr.to_i(context)).asInt(context);
         }
-        return RubyNumeric.fix2int(port);
+        return toInt(context, port);
     }
 }

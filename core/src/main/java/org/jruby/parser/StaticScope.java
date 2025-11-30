@@ -34,10 +34,12 @@ import java.lang.invoke.MethodHandle;
 import java.util.ArrayList;
 import java.util.Arrays;
 
+import java.util.BitSet;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.IntFunction;
 
 import org.jruby.Ruby;
@@ -45,10 +47,11 @@ import org.jruby.RubyArray;
 import org.jruby.RubyBasicObject;
 import org.jruby.RubyModule;
 import org.jruby.RubySymbol;
+import org.jruby.api.Convert;
+import org.jruby.api.Create;
 import org.jruby.ast.AssignableNode;
 import org.jruby.ast.DAsgnNode;
 import org.jruby.ast.DVarNode;
-import org.jruby.ast.IScopedNode;
 import org.jruby.ast.LocalAsgnNode;
 import org.jruby.ast.LocalVarNode;
 import org.jruby.ast.Node;
@@ -56,7 +59,6 @@ import org.jruby.ast.VCallNode;
 import org.jruby.ir.IRMethod;
 import org.jruby.ir.IRScope;
 import org.jruby.ir.IRScopeType;
-import org.jruby.runtime.Block;
 import org.jruby.runtime.DynamicScope;
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.Signature;
@@ -64,6 +66,10 @@ import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.runtime.scope.DynamicScopeGenerator;
 import org.jruby.runtime.scope.ManyVarsDynamicScope;
+
+import static org.jruby.api.Convert.asSymbol;
+import static org.jruby.api.Create.allocArray;
+import static org.jruby.api.Define.defineModule;
 
 /**
  * StaticScope represents lexical scoping of variables and module/class constants.
@@ -112,8 +118,6 @@ public class StaticScope implements Serializable, Cloneable {
     private boolean isBlockOrEval;
     private boolean isArgumentScope; // Is this block and argument scope of a define_method.
 
-    private int firstKeywordIndex;
-
     // Method/Closure that this static scope corresponds to.  This is used to tell whether this
     // scope refers to a method scope or to determined IRScope of the parent of a compiling eval.
     private IRScope irScope;
@@ -123,6 +127,18 @@ public class StaticScope implements Serializable, Cloneable {
     private volatile MethodHandle constructor;
 
     private volatile Collection<String> ivarNames;
+
+    private BitSet keywordIndices = null;
+
+    // This is set for Prism since it knows all names for a scope right after parse but does not know which
+    // ones are keywords until we are actually processing those keywords in builder.
+    public void setKeywordIndices(BitSet keywordIndices) {
+        this.keywordIndices = keywordIndices;
+    }
+
+    public BitSet getKeywordIndices() {
+        return keywordIndices == null ? new BitSet() : keywordIndices;
+    }
 
     public enum Type {
         LOCAL, BLOCK, EVAL;
@@ -172,7 +188,6 @@ public class StaticScope implements Serializable, Cloneable {
         if (enclosingScope != null) this.scopeType = enclosingScope.getScopeType();
         this.isBlockOrEval = (type != Type.LOCAL);
         this.isArgumentScope = !isBlockOrEval;
-        this.firstKeywordIndex = firstKeywordIndex;
         this.file = file;
     }
 
@@ -181,7 +196,7 @@ public class StaticScope implements Serializable, Cloneable {
     }
 
     public int getFirstKeywordIndex() {
-        return firstKeywordIndex;
+        return -1;
     }
 
     public DynamicScope construct(DynamicScope parent) {
@@ -296,46 +311,62 @@ public class StaticScope implements Serializable, Cloneable {
         System.arraycopy(names, 0, variableNames, 0, names.length);
     }
 
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject getConstantDefined(String internedName) {
+        return getConstantDefined(cref.getRuntime().getCurrentContext(), internedName);
+    }
+
     /**
      * Gets a constant back from lexical search from the cref in this scope.
      * As it is for defined? we will not forced resolution of autoloads nor
      * call const_defined
      */
-    public IRubyObject getConstantDefined(String internedName) {
-        IRubyObject result = cref.fetchConstant(internedName);
+    public IRubyObject getConstantDefined(ThreadContext context, String internedName) {
+        IRubyObject result = cref.fetchConstant(context, internedName);
 
         if (result != null) return result;
 
-        return previousCRefScope == null ? null : previousCRefScope.getConstantDefinedNoObject(internedName);
+        return previousCRefScope == null ? null : previousCRefScope.getConstantDefinedNoObject(context, internedName);
     }
 
+    @Deprecated(since = "10.0.0.0")
     public IRubyObject getConstantDefinedNoObject(String internedName) {
-        if (previousCRefScope == null) return null;
-
-        return getConstantDefined(internedName);
+        return getConstantDefinedNoObject(cref.getRuntime().getCurrentContext(), internedName);
     }
 
+    private IRubyObject getConstantDefinedNoObject(ThreadContext context, String internedName) {
+        return previousCRefScope == null ? null : getConstantDefined(context, internedName);
+    }
+
+    @Deprecated(since = "10.0.0.0")
     public IRubyObject getConstant(String internedName) {
-        IRubyObject result = getConstantInner(internedName);
+        return getConstant(cref.getRuntime().getCurrentContext(), internedName);
+    }
+
+    public IRubyObject getConstant(ThreadContext context, String internedName) {
+        IRubyObject result = getScopedConstant(context, internedName);
 
         // If we could not find the constant from cref..then try getting from inheritance hierarchy
-        return result == null ? cref.getConstantNoConstMissing(internedName) : result;
+        return result == null ? cref.getConstantNoConstMissing(context, internedName) : result;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public IRubyObject getConstantInner(String internedName) {
-        IRubyObject result = cref.getConstantWithAutoload(internedName, RubyBasicObject.UNDEF, true);
+        return getScopedConstant(cref.getRuntime().getCurrentContext(), internedName);
+    }
+
+    public IRubyObject getScopedConstant(ThreadContext context, String internedName) {
+        IRubyObject result = cref.getConstantWithAutoload(context, internedName, RubyBasicObject.UNDEF, true);
 
         // If we had a failed autoload, give up hierarchy search
         if (result == RubyBasicObject.UNDEF) return null;
         if (result != null) return result;
 
-        return previousCRefScope == null ? null : previousCRefScope.getConstantInnerNoObject(internedName);
+        return previousCRefScope == null ? null : previousCRefScope.getConstantInnerNoObject(context, internedName);
     }
 
-    private IRubyObject getConstantInnerNoObject(String internedName) {
-        if (previousCRefScope == null) return null;
-
-        return getConstantInner(internedName);
+    private IRubyObject getConstantInnerNoObject(ThreadContext context, String internedName) {
+        return previousCRefScope == null ? null : getScopedConstant(context, internedName);
     }
 
     /**
@@ -398,20 +429,19 @@ public class StaticScope implements Serializable, Cloneable {
      * a kwarg or an ordinary variable during live execution (See keywordExists).
      */
     public AssignableNode assignKeyword(int line, RubySymbol symbolID, Node value) {
-        AssignableNode assignment = assign(line, symbolID, value, this, 0);
+        AssignableNode assignable = assign(line, symbolID, value, this, 0);
 
-        // register first keyword index encountered
-        if (firstKeywordIndex == -1) firstKeywordIndex = ((IScopedNode) assignment).getIndex();
+        if (keywordIndices == null) keywordIndices = new BitSet();
+        keywordIndices.set(isDefined(symbolID.idString()));
 
-        return assignment;
+        return assignable;
     }
 
     public boolean keywordExists(String name) {
         if (name.equals("_")) return true;
         int slot = exists(name);
 
-        return slot >= 0 && firstKeywordIndex != -1 &&
-                slot >= firstKeywordIndex  && slot < firstKeywordIndex + signature.kwargs();
+        return slot >= 0 && keywordIndices != null && keywordIndices.get(slot);
     }
 
     /**
@@ -424,17 +454,6 @@ public class StaticScope implements Serializable, Cloneable {
         return collectVariables(ArrayList::new, ArrayList::add).stream().toArray(String[]::new);
     }
 
-    /**
-     * Populate a deduplicated collection of variable names in scope using the given functions.
-     *
-     * This may include variables that are not strictly Ruby local variable names, so the consumer should validate
-     * names as appropriate.
-     *
-     * @param collectionFactory used to construct the collection
-     * @param collectionPopulator used to pass values into the collection
-     * @param <T> resulting collection type
-     * @return populated collection
-     */
     public <T> T collectVariables(IntFunction<T> collectionFactory, BiConsumer<T, String> collectionPopulator) {
         StaticScope current = this;
 
@@ -455,20 +474,60 @@ public class StaticScope implements Serializable, Cloneable {
         }
 
         return collection;
+
     }
 
     /**
-     * Convenience wrapper around {@link #collectVariables(IntFunction, BiConsumer)}.
+     * Populate a deduplicated collection of variable names in scope using the given functions.
      *
-     * @param runtime current runtime
+     * This may include variables that are not strictly Ruby local variable names, so the consumer should validate
+     * names as appropriate.
+     *
+     * @param collectionFactory used to construct the collection
+     * @param collectionPopulator used to pass values into the collection
+     * @param <T> resulting collection type
+     * @return populated collection
+     */
+    public <T> T collectVariables(ThreadContext context, BiFunction<ThreadContext, Integer, T> collectionFactory, BiConsumer<T, String> collectionPopulator) {
+        StaticScope current = this;
+
+        T collection = collectionFactory.apply(context, current.variableNamesLength);
+
+        HashMap<String, Object> dedup = new HashMap<>();
+
+        while (current.isBlockOrEval) {
+            for (String name : current.variableNames) {
+                dedup.computeIfAbsent(name, key -> {collectionPopulator.accept(collection, key); return key;});
+            }
+            current = current.enclosingScope;
+        }
+
+        // once more for method scope
+        for (String name : current.variableNames) {
+            dedup.computeIfAbsent(name, key -> {collectionPopulator.accept(collection, key); return key;});
+        }
+
+        return collection;
+    }
+
+    @Deprecated(since = "10.0.0.0")
+    public RubyArray getLocalVariables(Ruby runtime) {
+        return getLocalVariables(runtime.getCurrentContext());
+    }
+
+    /**
+     * Get a Ruby Array of all local variables.
+     *
+     * @param context the current context
      * @return populated RubyArray
      */
-    public RubyArray getLocalVariables(Ruby runtime) {
+    public RubyArray getLocalVariables(ThreadContext context) {
         return collectVariables(
-                runtime::newArray,
+                context,
+                (ctxt, length) -> allocArray(ctxt, length),
                 (array, id) -> {
-                    RubySymbol symbol = runtime.newSymbol(id);
-                    if (symbol.validLocalVariableName()) array.append(symbol);
+                    RubySymbol symbol = Convert.asSymbol(context, id);
+                    if (symbol.validLocalVariableName()) array.append(context, symbol);
                 });
     }
 
@@ -680,7 +739,7 @@ public class StaticScope implements Serializable, Cloneable {
         dupe.setModule(cref);
         dupe.setFile(file);
         dupe.setSignature(signature);
-        dupe.firstKeywordIndex = firstKeywordIndex;
+        dupe.setKeywordIndices(keywordIndices);
 
         return dupe;
     }
@@ -692,7 +751,7 @@ public class StaticScope implements Serializable, Cloneable {
     public RubyModule getOverlayModuleForWrite(ThreadContext context) {
         RubyModule omod = overlayModule;
         if (omod == null) {
-            overlayModule = omod = RubyModule.newModule(context.runtime);
+            overlayModule = omod = defineModule(context);
         }
         return omod;
     }

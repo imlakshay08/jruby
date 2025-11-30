@@ -38,12 +38,13 @@ public interface CoreObjectType {
      *
      * @return the ClassIndex of the native type this object was constructed from
      */
-    @Deprecated
+    @Deprecated(since = "9.0.0.0")
     int getNativeTypeIndex();
     
     /**
      * Return the ClassIndex for the native type this object was constructed
      * from.
+     * @return the ClassIndex of the native type this object was constructed from
      */
     ClassIndex getNativeClassIndex();
 }

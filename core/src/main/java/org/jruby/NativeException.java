@@ -34,9 +34,12 @@ import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.javasupport.Java;
 import org.jruby.runtime.Block;
+import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
-@Deprecated
+import static org.jruby.api.Define.defineClass;
+
+@Deprecated(since = "9.2.0.0")
 @JRubyClass(name = "NativeException", parent = "RuntimeError")
 public class NativeException extends RubyException {
 
@@ -65,13 +68,13 @@ public class NativeException extends RubyException {
         this.messageAsJavaString = null;
     }
 
-    public static RubyClass createClass(Ruby runtime, RubyClass baseClass) {
-        RubyClass exceptionClass = runtime.defineClass(CLASS_NAME, baseClass, NativeException::new);
-        runtime.getObject().deprecateConstant(runtime, CLASS_NAME);
+    public static RubyClass createClass(ThreadContext context, RubyClass baseClass, RubyClass Object) {
+        RubyClass NativeException = defineClass(context, CLASS_NAME, baseClass, NativeException::new).
+                defineMethods(context, NativeException.class);
 
-        exceptionClass.defineAnnotatedMethods(NativeException.class);
+        Object.deprecateConstant(context, CLASS_NAME);
 
-        return exceptionClass;
+        return NativeException;
     }
 
     @JRubyMethod
@@ -79,7 +82,7 @@ public class NativeException extends RubyException {
         return Java.getInstance(getRuntime(), getCause());
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.0.0")
     public final IRubyObject cause(Block unusedBlock) {
         return cause();
     }
@@ -116,14 +119,14 @@ public class NativeException extends RubyException {
             final String className = element.getClassName();
             line.setLength(0);
             if (element.getFileName() == null) {
-                line.append(className).append(':').append(element.getLineNumber()).append(":in `").append(element.getMethodName()).append('\'');
+                line.append(className).append(':').append(element.getLineNumber()).append(":in '").append(element.getMethodName()).append('\'');
             } else {
                 final int index = className.lastIndexOf('.');
                 if ( index > - 1 ) {
                     line.append(className.substring(0, index).replace('.', '/'));
                     line.append('/');
                 }
-                line.append(element.getFileName()).append(':').append(element.getLineNumber()).append(":in `").append(element.getMethodName()).append('\'');
+                line.append(element.getFileName()).append(':').append(element.getLineNumber()).append(":in '").append(element.getMethodName()).append('\'');
             }
             trace[i] = RubyString.newString(runtime, line.toString());
         }
@@ -131,7 +134,7 @@ public class NativeException extends RubyException {
         return RubyArray.newArrayMayCopy(runtime, trace);
     }
 
-    @Deprecated // not used
+    @Deprecated(since = "9.1.0.0") // not used
     public void trimStackTrace(Member target) {
         Throwable t = new Throwable();
         StackTraceElement[] origStackTrace = cause.getStackTrace();

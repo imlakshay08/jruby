@@ -32,6 +32,8 @@ import org.jruby.ast.*;
 /**
  * An abstract implementation of {@link NodeVisitor} that has an abstract default visit method, and provides a utility
  * method to visit children.
+ *
+ * @param <T> return value for each visit
  */
 public abstract class AbstractNodeVisitor<T> implements NodeVisitor<T> {
 
@@ -246,6 +248,11 @@ public abstract class AbstractNodeVisitor<T> implements NodeVisitor<T> {
 
     @Override
     public T visitEnsureNode(EnsureNode node) {
+        return defaultVisit(node);
+    }
+
+    @Override
+    public T visitErrorNode(ErrorNode node) {
         return defaultVisit(node);
     }
 
@@ -625,7 +632,7 @@ public abstract class AbstractNodeVisitor<T> implements NodeVisitor<T> {
     }
 
     @Override
-    @Deprecated
+    @Deprecated(since = "9.2.0.0")
     public T visitClassVarDeclNode(ClassVarDeclNode node) {
         return defaultVisit(node);
     }

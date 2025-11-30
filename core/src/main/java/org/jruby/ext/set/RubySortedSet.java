@@ -38,6 +38,7 @@ import org.jruby.runtime.builtin.IRubyObject;
 import java.util.*;
 
 import static org.jruby.RubyArray.DefaultComparator;
+import static org.jruby.api.Define.defineClass;
 
 /**
  * Native implementation of Ruby's SortedSet (set.rb replacement).
@@ -47,13 +48,10 @@ import static org.jruby.RubyArray.DefaultComparator;
 @org.jruby.anno.JRubyClass(name="SortedSet", parent = "Set")
 public class RubySortedSet extends RubySet implements SortedSet {
 
-    static RubyClass createSortedSetClass(final Ruby runtime) {
-        RubyClass SortedSet = runtime.defineClass("SortedSet", runtime.getClass("Set"), RubySortedSet::new);
-
-        SortedSet.setReifiedClass(RubySortedSet.class);
-        SortedSet.defineAnnotatedMethods(RubySortedSet.class);
-
-        return SortedSet;
+    static RubyClass createSortedSetClass(ThreadContext context, RubyClass Set) {
+        return defineClass(context, "SortedSet", Set, RubySortedSet::new).
+                reifiedClass(RubySortedSet.class).
+                defineMethods(context, RubySortedSet.class);
     }
 
     private static class OrderComparator extends DefaultComparator {
@@ -98,19 +96,17 @@ public class RubySortedSet extends RubySet implements SortedSet {
 
     @JRubyMethod(name = "[]", rest = true, meta = true) // re-def Set[] for SortedSet
     public static RubySortedSet create(final ThreadContext context, IRubyObject self, IRubyObject... ary) {
-        final Ruby runtime = context.runtime;
-
-        RubySortedSet set = new RubySortedSet(runtime, (RubyClass) self);
+        RubySortedSet set = new RubySortedSet(context.runtime, (RubyClass) self);
         return (RubySortedSet) set.initSet(context, ary, 0, ary.length);
     }
 
     @Override
-    protected void addImpl(final Ruby runtime, final IRubyObject obj) {
+    protected void addImpl(ThreadContext context, final IRubyObject obj) {
         // NOTE: we're able to function without the check - comparator will raise ArgumentError
         //if ( ! obj.respondsTo("<=>") ) {
-        //    throw runtime.newArgumentError("value must respond to <=>");
+        //    throw argumentError(context, "value must respond to <=>");
         //}
-        super.addImpl(runtime, obj); // @hash[obj] = true
+        super.addImpl(context, obj); // @hash[obj] = true
         order.add(obj);
     }
 
@@ -122,8 +118,9 @@ public class RubySortedSet extends RubySet implements SortedSet {
 
     @Override
     protected boolean deleteImpl(final IRubyObject obj) {
-        if ( super.deleteImpl(obj) ) {
-            order.remove(obj); return true;
+        if (super.deleteImpl(obj)) {
+            order.remove(obj);
+            return true;
         }
         return false;
     }
@@ -136,8 +133,8 @@ public class RubySortedSet extends RubySet implements SortedSet {
     }
 
     @Override
-    protected void clearImpl() {
-        hash.rb_clear(getRuntime().getCurrentContext());
+    protected void clearImpl(ThreadContext context) {
+        hash.rb_clear(context);
         order.clear();
     }
 

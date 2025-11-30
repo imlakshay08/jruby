@@ -35,14 +35,13 @@ import java.util.Set;
 
 import org.jcodings.Encoding;
 import org.jcodings.specific.USASCIIEncoding;
-import org.jruby.Ruby;
-import org.jruby.RubyArray;
-import org.jruby.RubyString;
-import org.jruby.RubySymbol;
+import org.jruby.*;
 import org.jruby.ast.DefHolder;
 import org.jruby.ast.Node;
 import org.jruby.lexer.LexerSource;
 import org.jruby.lexer.yacc.LexContext;
+import org.jruby.parser.NodeExits;
+import org.jruby.parser.ProductionState;
 import org.jruby.parser.RubyParserBase;
 import org.jruby.parser.ScopedParserState;
 import org.jruby.runtime.Helpers;
@@ -53,13 +52,19 @@ import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.ByteList;
 import org.jruby.util.StringSupport;
 
+import static org.jruby.api.Convert.asSymbol;
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newEmptyArray;
+import static org.jruby.parser.RubyParserBase.IDType.AttrSet;
+import static org.jruby.parser.RubyParserBase.IDType.Class;
+import static org.jruby.parser.RubyParserBase.IDType.Constant;
+import static org.jruby.parser.RubyParserBase.IDType.Global;
+import static org.jruby.parser.RubyParserBase.IDType.Instance;
+import static org.jruby.parser.RubyParserBase.IDType.Local;
 import static org.jruby.util.CommonByteLists.*;
 import static org.jruby.util.RubyStringBuilder.inspectIdentifierByteList;
 import static org.jruby.util.RubyStringBuilder.str;
 
-/**
- *
- */
 public class RipperParserBase {
     public RipperParserBase(ThreadContext context, IRubyObject ripper, LexerSource source) {
         this.context = context;
@@ -205,11 +210,11 @@ public class RipperParserBase {
     }
     
     public IRubyObject intern(String value) {
-        return context.runtime.newSymbol(value);
+        return asSymbol(context, value);
     }
 
     public IRubyObject intern(ByteList value) {
-        return context.runtime.newSymbol(value);
+        return asSymbol(context, value);
     }
 
     protected IRubyObject new_defined(long _line, IRubyObject value) {
@@ -365,7 +370,8 @@ public class RipperParserBase {
     }
 
     protected IRubyObject backref_error(IRubyObject ref, IRubyObject expr) {
-        RubyString str = getRuntime().newString("Can't set variable ");
+        var runtime = ref.getRuntime();
+        RubyString str = runtime.newString("Can't set variable ");
         str = str.append(ref);
 
         return dispatch("on_assign_error",  str, expr);
@@ -382,30 +388,17 @@ public class RipperParserBase {
     }
 
     public IRubyObject method_optarg(IRubyObject method, IRubyObject arg) {
-        if (arg == null) return method;
-
-        return dispatch("on_method_add_arg", method, arg);
+        return arg == null ? method : dispatch("on_method_add_arg", method, arg);
     }
 
     public IRubyObject keyword_arg(IRubyObject key, IRubyObject value) {
-        RubyArray array = RubyArray.newArray(context.runtime, 2);
-
-        array.append(key);
-        if (value != null) {
-            array.append(value);
-        } else {
-            array.append(context.nil);
-        }
-
-        return array;
+        return newArray(context, key, value != null ? value : context.nil);
     }
 
     public IRubyObject new_args(int _line, IRubyObject f, IRubyObject o, IRubyObject r, IRubyObject p, ArgsTailHolder tail) {
-        if (tail != null) {
-            return dispatch("on_params", f, o, r, p, tail.getKeywordArgs(), tail.getKeywordRestArg(), tail.getBlockArg());
-        }
-
-        return dispatch("on_params", f, o, r, p, null, null, null);
+        return tail != null ?
+                dispatch("on_params", f, o, r, p, tail.getKeywordArgs(), tail.getKeywordRestArg(), tail.getBlockArg()) :
+                dispatch("on_params", f, o, r, p, null, null, null);
     }
 
     public ArgsTailHolder new_args_tail(int line, IRubyObject kwarg, IRubyObject kwargRest, ByteList block) {
@@ -446,11 +439,11 @@ public class RipperParserBase {
     }
     
     public IRubyObject new_array(IRubyObject ...args) {
-        return context.runtime.newArray(args);
+        return newArray(context, args);
     }
 
     public IRubyObject new_assoc(IRubyObject key, IRubyObject value) {
-        return RubyArray.newArray(context.runtime, key, value);
+        return newArray(context, key, value);
     }    
     
     public IRubyObject new_bv(ByteList identifier) {
@@ -496,7 +489,7 @@ public class RipperParserBase {
         if (indent <= 0) return array;
 
         lexer.setHeredocIndent(0);
-        dispatch("on_heredoc_dedent", array, getRuntime().newFixnum(indent));
+        dispatch("on_heredoc_dedent", array, RubyFixnum.newFixnum(getRuntime(), indent));
 
         return array;
     }
@@ -638,11 +631,15 @@ public class RipperParserBase {
         return holder.value;
     }
 
+    protected Set get_value(Set set) {
+        return set;
+    }
+
     protected IRubyObject get_value(RubyArray holder) {
         return holder.eltOk(0);
     }
 
-    public void endless_method_name(DefHolder holder) {
+    public void endless_method_name(DefHolder holder, ProductionState loc) {
         ByteList name = holder.name.getBytes();
         RubyParserBase.IDType type = RubyParserBase.id_type(name);
 
@@ -683,16 +680,15 @@ public class RipperParserBase {
     }
 
     public IRubyObject new_array_pattern(int _line, IRubyObject constant, IRubyObject preArg, RubyArray arrayPattern) {
-        RubyArray preArgs = (RubyArray) arrayPattern.eltOk(0);
+        var preArgs = (RubyArray<?>) arrayPattern.eltOk(0);
         IRubyObject restArg = arrayPattern.eltOk(1);
         IRubyObject postArgs = arrayPattern.eltOk(2);
 
         if (preArg != null) {
             if (preArgs != null) {
-                preArgs.unshift(preArg);
+                preArgs.unshift(context, preArg);
             } else {
-                preArgs = RubyArray.newArray(getRuntime());
-                preArgs.add(preArg);
+                preArgs = newArray(context, preArg);
             }
         }
 
@@ -751,21 +747,13 @@ public class RipperParserBase {
     }
 
     public RubyArray new_hash_pattern_tail(int _line, IRubyObject keywordArgs, IRubyObject keywordRestValue) {
-        IRubyObject restArg;
+        // To not make parser construct an array we will just detect the case of '**' with no arguments before it.
+        if (keywordArgs == null) keywordArgs = newEmptyArray(context);
 
-        // To not make parser construct an array we will just detect the case of '**' with no arguments
-        // before it.
-        if (keywordArgs == null) {
-            keywordArgs = getRuntime().newEmptyArray();
-        }
+        IRubyObject restArg = keywordRestValue != null ?
+                dispatch("on_var_field", keywordRestValue) : context.nil;
 
-        if (keywordRestValue != null) {
-            restArg = dispatch("on_var_field", keywordRestValue);
-        } else {                                   // '**'
-            restArg = context.nil;
-        }
-
-        return RubyArray.newArray(getRuntime(), keywordArgs, restArg);
+        return newArray(context, keywordArgs, restArg);
     }
 
     public IRubyObject makeNullNil(IRubyObject value) {
@@ -926,6 +914,119 @@ public class RipperParserBase {
         }
 
         return getRuntime().newSymbol(lexer.identValue);
+    }
+
+    protected NodeExits allow_block_exit() {
+        // FIXME: Impl
+        return null;
+    }
+
+    protected void clear_block_exit(boolean value) {
+
+    }
+
+    protected void next_rescue_context(LexContext context, LexContext.InRescue value) {
+
+    }
+
+    protected NodeExits init_block_exit() {
+        return new NodeExits();
+    }
+
+    protected void restore_block_exit(NodeExits nodeExits) {
+        // FIXME:Impl
+    }
+
+    protected void begin_definition(String name) {
+        LexContext ctxt = getLexContext();
+        ctxt.in_class = name != null;
+        if (!ctxt.in_class) {
+            ctxt.in_def = false;
+        } else if (ctxt.in_def) {
+            yyerror((name != null ? (name + " ") : "") + "definition in method body");
+        }
+        pushLocalScope();
+    }
+
+    protected void push_end_expect_token_locations(int line) {
+        // FIXME: impl
+    }
+
+    protected void token_info_setup(String value, ProductionState loc) {
+
+    }
+
+    protected void token_info_push(String value, ProductionState loc) {
+
+    }
+
+    protected void token_info_pop(String value, ProductionState loc) {
+        //  FIXME: impl
+    }
+    protected void token_info_drop(String value, ProductionState loc) {
+        //  FIXME: impl
+    }
+
+    protected void token_info_warn(String name, int same, ProductionState loc) {
+
+    }
+
+    protected boolean isEval() {
+        return false;
+    }
+
+    protected void WARN_EOL(String name) {
+        // FIXME: IMpl
+    }
+
+    public enum IDType {
+        Local, Global, Instance, AttrSet, Constant, Class;
+    }
+
+    public static RubyParserBase.IDType id_type(ByteList identifier) {
+        char first = identifier.charAt(0);
+
+        if (Character.isUpperCase(first)) return Constant;
+
+        switch(first) {
+            case '@':
+                return identifier.charAt(1) == '@' ? Class : Instance;
+            case '$':
+                return Global;
+        }
+
+        byte last = (byte) identifier.get(identifier.length() - 1);
+        if (last == '=') {
+            return AttrSet;
+        }
+
+        return Local;
+    }
+
+    protected IRubyObject it_id() {
+        return itId;
+    }
+
+    protected void set_it_id(IRubyObject node) {
+        this.itId = node;
+    }
+
+    private IRubyObject itId;
+
+    protected void forwarding_arg_check(ByteList rest, ByteList all, String var) {
+        // FIXME: Impl
+    }
+
+    protected void setLexContext(LexContext lexContext) {
+        lexer.setLexContext(lexContext);
+    }
+
+    protected IRubyObject NEW_ERROR(ProductionState value) {
+        return context.nil;
+    }
+
+    protected boolean dyna_in_block() {
+        return currentScope.isBlockScope() && !isEval();
     }
 
     protected IRubyObject ripper;

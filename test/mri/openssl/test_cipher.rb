@@ -108,12 +108,6 @@ class OpenSSL::TestCipher < OpenSSL::TestCase
     assert_not_equal s1, s2
   end
 
-  def test_empty_data
-    cipher = OpenSSL::Cipher.new("DES-EDE3-CBC").encrypt
-    cipher.random_key
-    assert_raise(ArgumentError) { cipher.update("") }
-  end
-
   def test_initialize
     cipher = OpenSSL::Cipher.new("DES-EDE3-CBC")
     assert_raise(RuntimeError) { cipher.__send__(:initialize, "DES-EDE3-CBC") }
@@ -132,6 +126,30 @@ class OpenSSL::TestCipher < OpenSSL::TestCase
     assert_equal ct, cipher.update(pt) << cipher.final
     cipher = new_decryptor("aes-128-ctr", key: key, iv: iv, padding: 0)
     assert_equal pt, cipher.update(ct) << cipher.final
+  end
+
+  def test_update_with_buffer
+    cipher = OpenSSL::Cipher.new("aes-128-ecb").encrypt
+    cipher.random_key
+    expected = cipher.update("data") << cipher.final
+    assert_equal 16, expected.bytesize
+
+    # Buffer is supplied
+    cipher.reset
+    buf = String.new
+    assert_same buf, cipher.update("data", buf)
+    assert_equal expected, buf + cipher.final
+
+    # Buffer is frozen
+    cipher.reset
+    assert_raise(FrozenError) { cipher.update("data", String.new.freeze) }
+
+    # Buffer is a shared string [ruby-core:120141] [Bug #20937]
+    cipher.reset
+    buf = "x" * 1024
+    shared = buf[-("data".bytesize + 32)..-1]
+    assert_same shared, cipher.update("data", shared)
+    assert_equal expected, shared + cipher.final
   end
 
   def test_ciphers
@@ -211,7 +229,7 @@ class OpenSSL::TestCipher < OpenSSL::TestCase
     assert_raise(OpenSSL::Cipher::CipherError) { cipher.update(ct2) }
   end if has_cipher?("aes-128-ccm") &&
          OpenSSL::Cipher.new("aes-128-ccm").authenticated? &&
-         OpenSSL::OPENSSL_VERSION_NUMBER >= 0x1010103f # version >= 1.1.1c
+         openssl?(1, 1, 1, 0x03, 0xf) # version >= 1.1.1c
 
   def test_aes_gcm
     # GCM spec Appendix B Test Case 4
@@ -335,6 +353,22 @@ class OpenSSL::TestCipher < OpenSSL::TestCase
 
     assert_equal ct1, ct2
     assert_equal tag1, tag2
+  end
+
+  def test_aes_keywrap_pad
+    # RFC 5649 Section 6; The second example
+    kek = ["5840df6e29b02af1ab493b705bf16ea1ae8338f4dcc176a8"].pack("H*")
+    key = ["466f7250617369"].pack("H*")
+    wrap = ["afbeb0f07dfbf5419200f2ccb50bb24f"].pack("H*")
+
+    begin
+      cipher = OpenSSL::Cipher.new("id-aes192-wrap-pad").encrypt
+    rescue OpenSSL::Cipher::CipherError, RuntimeError
+      omit "id-aes192-wrap-pad is not supported: #$!"
+    end
+    cipher.key = kek
+    ct = cipher.update(key) << cipher.final
+    assert_equal wrap, ct
   end
 
   def test_non_aead_cipher_set_auth_data

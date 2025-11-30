@@ -46,6 +46,7 @@ import org.jruby.RubyFile;
 import org.jruby.RubyHash;
 import org.jruby.RubyIO;
 import org.jruby.RubySymbol;
+import org.jruby.api.Create;
 import org.jruby.ast.ArrayNode;
 import org.jruby.ast.BlockNode;
 import org.jruby.ast.CallNode;
@@ -68,6 +69,10 @@ import org.jruby.runtime.load.LoadServiceResourceInputStream;
 import org.jruby.util.ByteList;
 import org.jruby.util.CommonByteLists;
 
+import static org.jruby.api.Access.objectClass;
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newEmptyArray;
+import static org.jruby.api.Create.newString;
 import static org.jruby.parser.ParserType.*;
 
 /**
@@ -87,7 +92,7 @@ public class Parser {
 
     protected ParseResult parse(String fileName, int lineNumber, InputStream in, Encoding encoding,
                              DynamicScope existingScope, ParserType type) {
-        RubyArray list = getLines(type == EVAL, fileName, -1);
+        var list = getLines(type == EVAL, fileName, -1);
 
         if (in instanceof LoadServiceResourceInputStream) {
             ByteList source = new ByteList(((LoadServiceResourceInputStream) in).getBytes(), encoding);
@@ -107,7 +112,8 @@ public class Parser {
             try {
                 return parse(lexerSource, existingScope, type);
             } finally {
-                if (requiresClosing && runtime.getObject().getConstantAt("DATA") != io) io.close();
+                var context = runtime.getCurrentContext();
+                if (requiresClosing && objectClass(context).getConstantAt(context, "DATA") != io) io.close();
 
                 // In case of GetsLexerSource we actually will dispatch to gets which will increment $.
                 // We do not want that in the case of raw parsing.
@@ -123,9 +129,9 @@ public class Parser {
             result = parser.parse();
             if (parser.isEndSeen() && type == ParserType.MAIN) runtime.defineDATA(lexerSource.getRemainingAsIO());
         } catch (IOException e) {
-            throw runtime.newSyntaxError("Problem reading source: " + e);
+            throw runtime.newSyntaxError("Problem reading source: " + e, existingScope.getStaticScope().getFile());
         } catch (SyntaxException e) {
-            throw runtime.newSyntaxError(e.getFile() + ":" + (e.getLine() + 1) + ": " + e.getMessage());
+            throw runtime.newSyntaxError(e.getFile() + ":" + (e.getLine() + 1) + ": " + e.getMessage(), e.getFile());
         }
 
         runtime.getParserManager().getParserStats().addParsedBytes(lexerSource.getOffset());
@@ -133,31 +139,31 @@ public class Parser {
         return (ParseResult) result.getAST();
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public Node parse(String file, ByteList content, DynamicScope blockScope,
             ParserConfiguration configuration) {
         configuration.setDefaultEncoding(content.getEncoding());
-        RubyArray list = getLines(configuration.isEvalParse(), file, -1);
+        var list = getLines(configuration.isEvalParse(), file, -1);
         LexerSource lexerSource = new ByteListLexerSource(file, configuration.getLineNumber(), content, list);
         return parse(file, lexerSource, blockScope, configuration);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public Node parse(String file, byte[] content, DynamicScope blockScope,
             ParserConfiguration configuration) {
-        RubyArray list = getLines(configuration.isEvalParse(), file, -1);
+        var list = getLines(configuration.isEvalParse(), file, -1);
         ByteList in = new ByteList(content, configuration.getDefaultEncoding());
         LexerSource lexerSource = new ByteListLexerSource(file, configuration.getLineNumber(), in,  list);
         return parse(file, lexerSource, blockScope, configuration);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public Node parse(String file, InputStream content, DynamicScope blockScope,
             ParserConfiguration configuration) {
         if (content instanceof LoadServiceResourceInputStream) {
             return parse(file, ((LoadServiceResourceInputStream) content).getBytes(), blockScope, configuration);
         } else {
-            RubyArray list = getLines(configuration.isEvalParse(), file, -1);
+            var list = getLines(configuration.isEvalParse(), file, -1);
             boolean requiresClosing = false;
             RubyIO io;
             if (content instanceof FileInputStream) {
@@ -171,7 +177,8 @@ public class Parser {
             try {
                 return parse(file, lexerSource, blockScope, configuration);
             } finally {
-                if (requiresClosing && runtime.getObject().getConstantAt("DATA") != io) io.close();
+                var context = runtime.getCurrentContext();
+                if (requiresClosing && objectClass(context).getConstantAt(context, "DATA") != io) io.close();
 
                 // In case of GetsLexerSource we actually will dispatch to gets which will increment $.
                 // We do not want that in the case of raw parsing.
@@ -180,7 +187,7 @@ public class Parser {
         }
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public Node parse(String file, LexerSource lexerSource, DynamicScope blockScope,
             ParserConfiguration configuration) {
         // We only need to pass in current scope if we are evaluating as a block (which
@@ -202,38 +209,42 @@ public class Parser {
             if (parser.lexer.isEndSeen() && configuration.isSaveData()) {
                 IRubyObject verbose = runtime.getVerbose();
                 runtime.setVerbose(runtime.getNil());
-                runtime.defineGlobalConstant("DATA", lexerSource.getRemainingAsIO());
+                runtime.getObject().defineConstant(runtime.getCurrentContext(), "DATA", lexerSource.getRemainingAsIO());
                 runtime.setVerbose(verbose);
             }
         } catch (IOException e) {
             // Enebo: We may want to change this error to be more specific,
             // but I am not sure which conditions leads to this...so lame message.
-            throw runtime.newSyntaxError("Problem reading source: " + e);
+            throw runtime.newSyntaxError("Problem reading source: " + e, file);
         } catch (SyntaxException e) {
-            throw runtime.newSyntaxError(e.getFile() + ":" + (e.getLine() + 1) + ": " + e.getMessage());
+            throw runtime.newSyntaxError(e.getFile() + ":" + (e.getLine() + 1) + ": " + e.getMessage(), e.getFile());
         }
 
         return result.getAST();
     }
 
-    protected RubyArray getLines(boolean isEvalParse, String file, int length) {
-        if (isEvalParse) return null;
+    protected RubyArray<?> getLines(boolean isEvalParse, String file, int length) {
+        Ruby runtime = this.runtime;
 
-        IRubyObject scriptLines = runtime.getObject().getConstantAt("SCRIPT_LINES__");
-        if (scriptLines == null || !(scriptLines instanceof RubyHash)) return null;
+        // only gather eval lines if eval coverage is enabled
+        if (isEvalParse && (!runtime.isCoverageEnabled() || !runtime.getCoverageData().isEvalCovered())) return null;
 
-        RubyArray list = length == -1 ? runtime.newArray() : runtime.newArray(length);
-        ((RubyHash) scriptLines).op_aset(runtime.getCurrentContext(), runtime.newString(file), list);
+        var context = runtime.getCurrentContext();
+        IRubyObject scriptLines = objectClass(context).getConstantAt(context, "SCRIPT_LINES__");
+        if (!(scriptLines instanceof RubyHash hash)) return null;
+
+        var list = length == -1 ? newEmptyArray(context) : Create.allocArray(context, length);
+        hash.op_aset(context, newString(context, file), list);
         return list;
     }
 
     public IRubyObject getLineStub(ThreadContext context, ParseResult result, int lineCount) {
-        RubyArray lines = context.runtime.newArray();
+        var lines = newArray(context);
         LineStubVisitor lineVisitor = new LineStubVisitor(context.runtime, lines);
         lineVisitor.visitRootNode(((RootNode) result));
 
         for (int i = 0; i <= lineCount - lines.size(); i++) {
-            lines.append(context.nil);
+            lines.append(context, context.nil);
         }
         return lines;
     }

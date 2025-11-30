@@ -12,7 +12,7 @@
  * rights and limitations under the License.
  *
  * Copyright (C) 2006 MenTaLguY <mental@rydia.net>
- * 
+ *
  * Alternatively, the contents of this file may be used under the terms of
  * either of the GNU General Public License Version 2 or later (the "GPL"),
  * or the GNU Lesser General Public License Version 2.1 or later (the "LGPL"),
@@ -29,6 +29,7 @@
 package org.jruby.ext.thread;
 
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -37,18 +38,29 @@ import org.jruby.Ruby;
 import org.jruby.RubyArray;
 import org.jruby.RubyBoolean;
 import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
+import org.jruby.RubyHash;
 import org.jruby.RubyMarshal;
 import org.jruby.RubyNumeric;
 import org.jruby.RubyObject;
 import org.jruby.RubyThread;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
+import org.jruby.ast.util.ArgsUtil;
 import org.jruby.exceptions.RaiseException;
+import org.jruby.runtime.Helpers;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.Visibility;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.runtime.marshal.DataType;
 import org.jruby.util.TypeConverter;
+
+import static org.jruby.api.Access.arrayClass;
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.toDouble;
+import static org.jruby.api.Error.argumentError;
+import static org.jruby.api.Error.typeError;
 
 /*
  * Written by Doug Lea with assistance from members of JCP JSR-166
@@ -233,10 +245,15 @@ public class Queue extends RubyObject implements DataType {
         putLock.unlock();
     }
 
+    @Deprecated(since = "10.0.0.0")
     protected void initializedCheck() {
+        initializedCheck(getCurrentContext());
+    }
+
+    protected void initializedCheck(ThreadContext context) {
         // Ruby initialized check seems to be a genius way to make all methods slower :),
         // here we piggy back on capacity not being allowed to equal 0.
-        if (capacity == 0) throw getRuntime().newTypeError(this + " not initialized");
+        if (capacity == 0) throw typeError(context, this + " not initialized");
     }
 
     public Queue(Ruby runtime, RubyClass type) {
@@ -245,24 +262,16 @@ public class Queue extends RubyObject implements DataType {
         last = head = new Node(null);
     }
 
-    public static RubyClass setup(RubyClass threadClass, RubyClass objectClass) {
-        RubyClass cQueue = threadClass.defineClassUnder("Queue", objectClass, Queue::new);
-
-        cQueue.undefineMethod("initialize_copy");
-        cQueue.setReifiedClass(Queue.class);
-        cQueue.defineAnnotatedMethods(Queue.class);
-
-        objectClass.setConstant("Queue", cQueue);
-
-        return cQueue;
+    public static RubyClass setup(ThreadContext context, RubyClass Thread, RubyClass Object) {
+        return (RubyClass) Object.setConstant(context, "Queue",
+                Thread.defineClassUnder(context, "Queue", Object, Queue::new).
+                        reifiedClass(Queue.class).defineMethods(context, Queue.class).
+                        undefMethods(context, "initialize_copy"));
     }
 
-    public static RubyClass setupError(RubyClass cQueue, RubyClass stopIteration, RubyClass objectClass) {
-        RubyClass cClosedQueueError = cQueue.defineClassUnder("ClosedQueueError", stopIteration, stopIteration.getAllocator());
-
-        objectClass.setConstant("ClosedQueueError", cClosedQueueError);
-
-        return cClosedQueueError;
+    public static RubyClass setupError(ThreadContext context, RubyClass Queue, RubyClass StopIteration, RubyClass Object) {
+        return (RubyClass) Object.setConstant(context, "ClosedQueueError",
+                Queue.defineClassUnder(context, "ClosedQueueError", StopIteration, StopIteration.getAllocator()));
     }
 
     @JRubyMethod(visibility = Visibility.PRIVATE)
@@ -274,15 +283,12 @@ public class Queue extends RubyObject implements DataType {
     @JRubyMethod(visibility = Visibility.PRIVATE)
     public IRubyObject initialize(ThreadContext context, IRubyObject items) {
         this.capacity = Integer.MAX_VALUE;
-        Ruby runtime = context.runtime;
-        IRubyObject tmp = TypeConverter.convertToTypeWithCheck(context, items, runtime.getArray(), context.sites.TypeConverter.to_a_checked);
-        if (!tmp.isNil()) {
-            RubyArray array = (RubyArray)tmp;
-            for (int i = 0; i < array.getLength(); i++) {
-                push(context, array.eltOk(i));
-            }
-        } else {
-            throw runtime.newTypeError("can't convert " + items.getMetaClass() + " into Array");
+        IRubyObject tmp = TypeConverter.convertToTypeWithCheck(context, items, arrayClass(context), context.sites.TypeConverter.to_a_checked);
+        if (tmp.isNil()) throw typeError(context, "can't convert ", items, " into Array");
+
+        RubyArray array = (RubyArray) tmp;
+        for (int i = 0; i < array.getLength(); i++) {
+            push(context, array.eltOk(i));
         }
 
         return this;
@@ -294,7 +300,7 @@ public class Queue extends RubyObject implements DataType {
      */
     @JRubyMethod
     public IRubyObject clear(ThreadContext context) {
-        initializedCheck();
+        initializedCheck(context);
         try {
             clearInternal();
         } catch (InterruptedException ie) {
@@ -328,26 +334,32 @@ public class Queue extends RubyObject implements DataType {
         }
     }
 
+    @JRubyMethod(name = "freeze")
+    @Override
+    public final IRubyObject freeze(ThreadContext context) {
+        throw typeError(context, "cannot freeze " + this);
+    }
+
     @JRubyMethod(name = "empty?")
     public RubyBoolean empty_p(ThreadContext context) {
-        initializedCheck();
-        return RubyBoolean.newBoolean(context, count.get() == 0);
+        initializedCheck(context);
+        return asBoolean(context, count.get() == 0);
     }
 
     @JRubyMethod(name = {"length", "size"})
     public RubyNumeric length(ThreadContext context) {
-        initializedCheck();
-        return RubyNumeric.int2fix(context.runtime, count.get());
+        initializedCheck(context);
+        return asFixnum(context, count.get());
     }
 
     @JRubyMethod
     public RubyNumeric num_waiting(ThreadContext context) {
-        initializedCheck();
+        initializedCheck(context);
         final ReentrantLock takeLock = this.takeLock;
         try {
             takeLock.lockInterruptibly();
             try {
-                return context.runtime.newFixnum(takeLock.getWaitQueueLength(notEmpty));
+                return asFixnum(context, takeLock.getWaitQueueLength(notEmpty));
             } finally {
                 takeLock.unlock();
             }
@@ -358,9 +370,9 @@ public class Queue extends RubyObject implements DataType {
 
     @JRubyMethod(name = {"pop", "deq", "shift"})
     public IRubyObject pop(ThreadContext context) {
-        initializedCheck();
+        initializedCheck(context);
         try {
-            return context.getThread().executeTaskBlocking(context, this, BLOCKING_POP_TASK);
+            return context.getThread().executeTaskBlocking(context, this, BLOCKING_TAKE_TASK);
         } catch (InterruptedException ie) {
             // FIXME: is this the right thing to do?
             throw createInterruptedError(context, "pop");
@@ -368,27 +380,85 @@ public class Queue extends RubyObject implements DataType {
     }
 
     @JRubyMethod(name = {"pop", "deq", "shift"})
-    public IRubyObject pop(ThreadContext context, IRubyObject nonblock) {
-        initializedCheck();
+    public IRubyObject pop(ThreadContext context, IRubyObject nonblockOrOpts) {
+        initializedCheck(context);
+
+        boolean nonblock = false;
+        long timeoutNS = 0;
+
+        RubyHash opts = ArgsUtil.extractKeywords(nonblockOrOpts);
+
+        if (opts != null) {
+            IRubyObject _timeout = ArgsUtil.extractKeywordArg(context, "timeout", opts);
+
+            if (!_timeout.isNil()) {
+                timeoutNS = queueTimeoutToNanos(context, _timeout);
+
+                if (timeoutNS == 0 && count.get() == 0) {
+                    return context.nil;
+                }
+            }
+        } else {
+            nonblock = nonblockOrOpts.isTrue();
+        }
+
+        return popCommon(context, nonblock, timeoutNS);
+    }
+
+    @JRubyMethod(name = {"pop", "deq", "shift"})
+    public IRubyObject pop(ThreadContext context, IRubyObject _nonblock, IRubyObject _opts) {
+        initializedCheck(context);
+
+        boolean nonblock = _nonblock.isTrue();
+        long timeoutNS = 0;
+
+        IRubyObject _timeout = ArgsUtil.extractKeywordArg(context, "timeout", _opts);
+        if (!_timeout.isNil()) {
+            if (nonblock) throw argumentError(context, "can't set a timeout if non_block is enabled");
+
+            timeoutNS = queueTimeoutToNanos(context, _timeout);
+
+            if (timeoutNS == 0 && count.get() == 0) return context.nil;
+        }
+
+        return popCommon(context, nonblock, timeoutNS);
+    }
+
+    private IRubyObject popCommon(ThreadContext context, boolean nonblock, long timeoutNS) {
         try {
-            if (nonblock.isTrue()) {
+            RubyThread.Task<Queue, IRubyObject> task;
+
+            if (nonblock) {
                 IRubyObject result = pollInternal();
                 if (result == null) {
                     throw context.runtime.newThreadError("queue empty");
-                } else {
-                    return result;
                 }
-            } else {
-                return context.getThread().executeTaskBlocking(context, this, BLOCKING_POP_TASK);
+                return result;
             }
+
+            if (timeoutNS != 0) {
+                task = new BlockingPollTask(timeoutNS);
+            } else {
+                task = BLOCKING_TAKE_TASK;
+            }
+
+            return context.getThread().executeTaskBlocking(context, this, task);
         } catch (InterruptedException ie) {
             throw createInterruptedError(context, "pop");
         }
     }
 
+    protected static long queueTimeoutToNanos(ThreadContext context, IRubyObject _timeout) {
+        if (_timeout.isNil()) return 0;
+
+        return _timeout instanceof RubyFixnum fixnum ?
+                TimeUnit.NANOSECONDS.convert(fixnum.getValue(), TimeUnit.SECONDS) :
+                (long) (toDouble(context, _timeout) * 1_000_000_000);
+    }
+
     @JRubyMethod(name = {"push", "<<", "enq"})
     public IRubyObject push(ThreadContext context, IRubyObject value) {
-        initializedCheck();
+        initializedCheck(context);
         try {
             putInternal(context, value);
         } catch (InterruptedException ie) {
@@ -466,7 +536,7 @@ public class Queue extends RubyObject implements DataType {
 
     @JRubyMethod
     public IRubyObject close(ThreadContext context) {
-        initializedCheck();
+        initializedCheck(context);
         try {
             closeInternal();
         } catch (InterruptedException ie) {
@@ -511,8 +581,8 @@ public class Queue extends RubyObject implements DataType {
 
     @JRubyMethod(name = "closed?")
     public IRubyObject closed_p(ThreadContext context) {
-        initializedCheck();
-        return RubyBoolean.newBoolean(context, closed);
+        initializedCheck(context);
+        return asBoolean(context, closed);
     }
 
     public synchronized void shutdown() throws InterruptedException {
@@ -523,9 +593,10 @@ public class Queue extends RubyObject implements DataType {
         return closed;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public synchronized void checkShutdown() {
         if (isShutdown()) {
-            Ruby runtime = getRuntime();
+            Ruby runtime = getCurrentContext().runtime;
             throw RaiseException.from(runtime, runtime.getThreadError(), "queue shut down");
         }
     }
@@ -584,32 +655,51 @@ public class Queue extends RubyObject implements DataType {
         final AtomicInteger count = this.count;
         if (count.get() == 0)
             return null;
-        IRubyObject x = null;
-        boolean notFullSignalNeeded = false;
+        final IRubyObject x;
+        final int c;
         final ReentrantLock takeLock = this.takeLock;
-        takeLock.lockInterruptibly();
+        takeLock.lock();
         try {
-            if (count.get() > 0) {
-                x = dequeue();
-                int c = count.getAndDecrement();
-                if (c > 1)
-                    notEmpty.signal();
-                // LinkedBlockingQueue diff: moved this check into locked
-                // section because of SizedQueue.max=, this might not be
-                // necessary (just be being overly cautious). With that move
-                // `int c` declaration is also now in locked region.
-                notFullSignalNeeded = c == capacity;
-            }
+            if (count.get() == 0)
+                return null;
+            x = dequeue();
+            c = count.getAndDecrement();
+            if (c > 1)
+                notEmpty.signal();
         } finally {
             takeLock.unlock();
         }
-        if (notFullSignalNeeded)
+        if (c == capacity)
             signalNotFull();
         return x;
     }
 
+    public IRubyObject pollInternal(long timeout, TimeUnit unit) throws InterruptedException {
+        final IRubyObject x;
+        final int c;
+        long nanos = unit.toNanos(timeout);
+        final AtomicInteger count = this.count;
+        final ReentrantLock takeLock = this.takeLock;
+        takeLock.lockInterruptibly();
+        try {
+            while (count.get() == 0) {
+                if (nanos <= 0L)
+                    return null;
+                nanos = notEmpty.awaitNanos(nanos);
+            }
+            x = dequeue();
+            c = count.getAndDecrement();
+            if (c > 1)
+                notEmpty.signal();
+        } finally {
+            takeLock.unlock();
+        }
+        if (c == capacity)
+            signalNotFull();
+        return x;
+    }
 
-    private static final RubyThread.Task<Queue, IRubyObject> BLOCKING_POP_TASK = new RubyThread.Task<Queue, IRubyObject>() {
+    private static final RubyThread.Task<Queue, IRubyObject> BLOCKING_TAKE_TASK = new RubyThread.Task<Queue, IRubyObject>() {
         public IRubyObject run(ThreadContext context, Queue queue) throws InterruptedException {
             while (true) {
                 try {
@@ -630,6 +720,29 @@ public class Queue extends RubyObject implements DataType {
     }
 
     protected RaiseException createInterruptedError(ThreadContext context, String methodName) {
-        return context.runtime.newThreadError("interrupted in " + getMetaClass().getName() + "#" + methodName);
+        return context.runtime.newThreadError("interrupted in " + getMetaClass().getName(context) + "#" + methodName);
+    }
+
+    private static class BlockingPollTask implements RubyThread.Task<Queue, IRubyObject> {
+        private final long timeoutNS;
+
+        public BlockingPollTask(long timeoutNS) {
+            this.timeoutNS = timeoutNS;
+        }
+
+        @Override
+        public IRubyObject run(ThreadContext context, Queue queue) throws InterruptedException {
+                IRubyObject result = timeoutNS == 0 ? queue.pollInternal() : queue.pollInternal(timeoutNS, TimeUnit.NANOSECONDS);
+                if (result == null && timeoutNS == 0) {
+                    throw context.runtime.newThreadError("queue empty");
+                } else {
+                    return Helpers.nullToNil(result, context.nil);
+                }
+            }
+
+        @Override
+        public void wakeup(RubyThread thread, Queue queue) {
+            thread.getNativeThread().interrupt();
+        }
     }
 }

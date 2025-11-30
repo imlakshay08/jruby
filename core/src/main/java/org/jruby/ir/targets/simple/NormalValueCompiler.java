@@ -17,6 +17,8 @@ import org.jruby.compiler.impl.SkinnyMethodAdapter;
 import org.jruby.ir.IRManager;
 import org.jruby.ir.IRScope;
 import org.jruby.ir.instructions.CallBase;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.StringLiteral;
 import org.jruby.ir.operands.UndefinedValue;
 import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.ir.targets.IRBytecodeAdapter;
@@ -38,7 +40,9 @@ import org.objectweb.asm.Type;
 
 import java.lang.invoke.MethodType;
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.jruby.util.CodegenUtils.ci;
@@ -104,16 +108,43 @@ public class NormalValueCompiler implements ValueCompiler {
         compiler.adapter.invokestatic(p(RubyString.class), "newStringShared", sig(RubyString.class, Ruby.class, ByteList.class, int.class));
     }
 
+    public void pushChilledString(ByteList bl, int cr, String file, int line) {
+        pushRuntime();
+        pushByteList(bl);
+        compiler.adapter.ldc(cr);
+        compiler.adapter.ldc(file);
+        compiler.adapter.ldc(line);
+        compiler.adapter.invokestatic(p(RubyString.class), "newChilledString", sig(RubyString.class, Ruby.class, ByteList.class, int.class, String.class, int.class));
+    }
+
     public void pushFrozenString(final ByteList bl, final int cr, final String file, final int line) {
         cacheValuePermanentlyLoadContext("fstring", RubyString.class, keyFor("fstring", bl), () -> {
-            compiler.loadContext();
-            compiler.adapter.ldc(bl.toString());
-            compiler.adapter.ldc(bl.getEncoding().toString());
-            compiler.adapter.ldc(cr);
-            compiler.adapter.ldc(file);
-            compiler.adapter.ldc(line);
-            compiler.invokeIRHelper("newFrozenStringFromRaw", sig(RubyString.class, ThreadContext.class, String.class, String.class, int.class, String.class, int.class));
+            pushFrozenStringUncached(bl, cr, file, line);
         });
+    }
+
+    private void pushFrozenStringUncached(ByteList bl, int cr, String file, int line) {
+        compiler.loadContext();
+        compiler.adapter.ldc(bl.toString());
+        compiler.adapter.ldc(bl.getEncoding().toString());
+        compiler.adapter.ldc(cr);
+        compiler.adapter.ldc(file);
+        compiler.adapter.ldc(line);
+        compiler.invokeIRHelper("newFrozenStringFromRaw", sig(RubyString.class, ThreadContext.class, String.class, String.class, int.class, String.class, int.class));
+    }
+
+    public void pushFrozenString(final ByteList bl, final int cr) {
+        cacheValuePermanentlyLoadContext("fstring", RubyString.class, keyFor("fstring", bl), () -> {
+            pushFrozenStringUncached(bl, cr);
+        });
+    }
+
+    private void pushFrozenStringUncached(ByteList bl, int cr) {
+        compiler.loadContext();
+        compiler.adapter.ldc(bl.toString());
+        compiler.adapter.ldc(bl.getEncoding().toString());
+        compiler.adapter.ldc(cr);
+        compiler.invokeIRHelper("newFrozenStringFromRaw", sig(RubyString.class, ThreadContext.class, String.class, String.class, int.class));
     }
 
     public void pushEmptyString(Encoding encoding) {
@@ -127,6 +158,30 @@ public class NormalValueCompiler implements ValueCompiler {
         compiler.adapter.pushInt(size);
         pushEncoding(encoding);
         compiler.adapter.invokestatic(p(RubyString.class), "newStringLight", sig(RubyString.class, Ruby.class, int.class, Encoding.class));
+    }
+
+    public void buildDynamicString(Encoding encoding, int size, boolean frozen, boolean chilled, boolean debugFrozen, String file, int line, List<DStringElement> elements) {
+        pushBufferString(encoding, size);
+
+        for (DStringElement elt : elements) {
+            switch (elt.type()) {
+                case STRING:
+                    StringLiteral str = (StringLiteral) elt.value();
+                    pushFrozenString(str.getByteList(), str.getCodeRange());
+                    compiler.adapter.invokevirtual(p(RubyString.class), "catWithCodeRange", sig(RubyString.class, RubyString.class));
+                    break;
+                case OTHER:
+                    ((Runnable) elt.value()).run();
+                    compiler.adapter.invokevirtual(p(RubyString.class), "appendAsDynamicString", sig(RubyString.class, IRubyObject.class));
+            }
+        }
+        if (frozen) {
+            compiler.invokeIRHelper("freezeLiteralString", sig(RubyString.class, RubyString.class));
+        }
+
+        if (chilled) {
+            compiler.invokeIRHelper("chillLiteralString", sig(RubyString.class, RubyString.class));
+        }
     }
 
     public void pushByteList(final ByteList bl) {
@@ -143,8 +198,55 @@ public class NormalValueCompiler implements ValueCompiler {
             compiler.loadContext();
             begin.run();
             end.run();
-            compiler.adapter.pushBoolean(exclusive);
-            compiler.adapter.invokestatic(p(RubyRange.class), "newRange", sig(RubyRange.class, ThreadContext.class, IRubyObject.class, IRubyObject.class, boolean.class));
+            if (exclusive) {
+                compiler.adapter.invokestatic(p(RubyRange.class), "newRange", sig(RubyRange.class, ThreadContext.class, IRubyObject.class, IRubyObject.class));
+            } else {
+                compiler.adapter.invokestatic(p(RubyRange.class), "newRange", sig(RubyRange.class, ThreadContext.class, IRubyObject.class, IRubyObject.class));
+            }
+        });
+    }
+
+    public void pushRange(long begin, long end, boolean exclusive) {
+        cacheValuePermanentlyLoadContext("range", RubyRange.class, null, () -> {
+            compiler.loadContext();
+            compiler.adapter.ldc(begin);
+            compiler.adapter.ldc(end);
+            if (exclusive) {
+                compiler.adapter.invokestatic(p(RubyRange.class), "newExclusiveRange", sig(RubyRange.class, ThreadContext.class, long.class, long.class));
+            } else {
+                compiler.adapter.invokestatic(p(RubyRange.class), "newInclusiveRange", sig(RubyRange.class, ThreadContext.class, long.class, long.class));
+            }
+        });
+    }
+
+    public void pushEndlessRange(long end, boolean exclusive) {
+        cacheValuePermanentlyLoadContext("range", RubyRange.class, null, () -> {
+            compiler.loadContext();
+            compiler.adapter.ldc(end);
+            compiler.adapter.ldc(exclusive);
+            compiler.adapter.invokestatic(p(RubyRange.class), "newEndlessRange", sig(RubyRange.class, ThreadContext.class, long.class, boolean.class));
+        });
+    }
+
+    public void pushBeginlessRange(long begin, boolean exclusive) {
+        cacheValuePermanentlyLoadContext("range", RubyRange.class, null, () -> {
+            compiler.loadContext();
+            compiler.adapter.ldc(begin);
+            compiler.adapter.ldc(exclusive);
+            compiler.adapter.invokestatic(p(RubyRange.class), "newBeginlessRange", sig(RubyRange.class, ThreadContext.class, long.class, boolean.class));
+        });
+    }
+
+    public void pushRange(ByteList begin, int beginCR, ByteList end, int endCR, boolean exclusive) {
+        cacheValuePermanentlyLoadContext("range", RubyRange.class, null, () -> {
+            compiler.loadContext();
+            pushFrozenStringUncached(begin, beginCR);
+            pushFrozenStringUncached(end, endCR);
+            if (exclusive) {
+                compiler.adapter.invokestatic(p(RubyRange.class), "newExclusiveRange", sig(RubyRange.class, ThreadContext.class, IRubyObject.class, IRubyObject.class));
+            } else {
+                compiler.adapter.invokestatic(p(RubyRange.class), "newInclusiveRange", sig(RubyRange.class, ThreadContext.class, IRubyObject.class, IRubyObject.class));
+            }
         });
     }
 
@@ -400,4 +502,16 @@ public class NormalValueCompiler implements ValueCompiler {
     }
 
     private final Map<Object, String> cacheFieldNames = new HashMap<>();
+
+    public void pushFixnumArray(List<Long> values) {
+        values.forEach(obj -> pushFixnum(obj.longValue()));
+
+        compiler.getDynamicValueCompiler().array(values.size());
+    }
+
+    public void pushFloatArray(List<Double> values) {
+        values.forEach(obj -> pushFloat(obj.doubleValue()));
+
+        compiler.getDynamicValueCompiler().array(values.size());
+    }
 }

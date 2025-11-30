@@ -30,12 +30,8 @@ package org.jruby.runtime.load;
 
 import org.jruby.Ruby;
 
-/**
- * @see org.jruby.RubyModule.AutoloadMethod
- * @author jpetersen
- */
-@Deprecated // no longer used
+@Deprecated(since = "9.0.5.0") // no longer used
 public interface IAutoloadMethod {
-    public String file();
-    public void load(Ruby runtime);
+    String file();
+    void load(Ruby runtime);
 }

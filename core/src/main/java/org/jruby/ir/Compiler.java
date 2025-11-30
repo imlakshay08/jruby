@@ -44,24 +44,24 @@ public class Compiler extends IRTranslator<ScriptAndCode, ClassDefiningClassLoad
     }
 
     @Override
-    protected ScriptAndCode execute(final Ruby runtime, final IRScriptBody scope, ClassDefiningClassLoader classLoader) {
+    protected ScriptAndCode execute(ThreadContext context, final IRScriptBody scope, ClassDefiningClassLoader classLoader) {
         JVMVisitor visitor;
         Class compiled;
         byte[] bytecode;
 
         // Check for eval in any scope, which isn't supported for AOT right now
-        if (scope.anyUsesEval() || scope.hasFlipFlops()) {
-            throw new NotCompilableException("AOT not supported for scripts containing eval or flip-flops.");
+        if (scope.anyUsesEval()) {
+            throw new NotCompilableException("AOT not supported for scripts containing eval.");
         }
 
         boolean cacheClasses = Options.COMPILE_CACHE_CLASSES.load();
 
         try {
             // If we're caching, use AOT-appropriate bytecode
-            visitor = cacheClasses ? JVMVisitor.newForAOT(runtime) : JVMVisitor.newForJIT(runtime);
+            visitor = cacheClasses ? JVMVisitor.newForAOT(context.runtime) : JVMVisitor.newForJIT(context.runtime);
 
-            JVMVisitorMethodContext context = new JVMVisitorMethodContext();
-            bytecode = visitor.compileToBytecode(scope, context);
+            JVMVisitorMethodContext methodContext = new JVMVisitorMethodContext();
+            bytecode = visitor.compileToBytecode(scope, methodContext);
             compiled = visitor.defineScriptFromBytecode(scope, bytecode, classLoader);
         } catch (NotCompilableException nce) {
             throw nce;

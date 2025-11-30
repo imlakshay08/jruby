@@ -3,14 +3,52 @@ require 'test/unit'
 require 'envutil'
 require 'uri'
 
-module URI
-
-
-class TestCommon < Test::Unit::TestCase
+class URI::TestCommon < Test::Unit::TestCase
   def setup
   end
 
   def teardown
+  end
+
+  EnvUtil.suppress_warning do
+    class Foo
+      # Intentionally use `URI::REGEXP`, which is for the compatibility
+      include URI::REGEXP::PATTERN
+    end
+  end
+
+  def test_fallback_constants
+    EnvUtil.suppress_warning do
+      assert_raise(NameError) { URI::FOO }
+
+      assert_equal URI::ABS_URI, URI::RFC2396_PARSER.regexp[:ABS_URI]
+      assert_equal URI::PATTERN, URI::RFC2396_Parser::PATTERN
+      assert_equal URI::REGEXP, URI::RFC2396_REGEXP
+      assert_equal URI::REGEXP::PATTERN, URI::RFC2396_REGEXP::PATTERN
+      assert_equal Foo::IPV4ADDR, URI::RFC2396_REGEXP::PATTERN::IPV4ADDR
+    end
+  end
+
+  def test_parser_switch
+    assert_equal(URI::Parser, URI::RFC3986_Parser)
+    refute defined?(URI::REGEXP)
+    refute defined?(URI::PATTERN)
+
+    URI.parser = URI::RFC2396_PARSER
+
+    assert_equal(URI::Parser, URI::RFC2396_Parser)
+    assert defined?(URI::REGEXP)
+    assert defined?(URI::PATTERN)
+    assert defined?(URI::PATTERN::ESCAPED)
+    assert defined?(URI::REGEXP::PATTERN::IPV6ADDR)
+
+    URI.parser = URI::RFC3986_PARSER
+
+    assert_equal(URI::Parser, URI::RFC3986_Parser)
+    refute defined?(URI::REGEXP)
+    refute defined?(URI::PATTERN)
+  ensure
+    URI.parser = URI::RFC3986_PARSER
   end
 
   def test_extract
@@ -116,7 +154,7 @@ class TestCommon < Test::Unit::TestCase
     pre = ->(n) {
       'https://example.com/dir/' + 'a' * (n * 100) + '/##.jpg'
     }
-    assert_linear_performance((1..10).map {|i| i * 100}, pre: pre) do |uri|
+    assert_linear_performance((1..3).map {|i| 10**i}, rehearsal: 1000, pre: pre) do |uri|
       assert_raise(URI::InvalidURIError) do
         URI.parse(uri)
       end
@@ -291,7 +329,4 @@ class TestCommon < Test::Unit::TestCase
 
   private
   def s(str) str.force_encoding(Encoding::Windows_31J); end
-end
-
-
 end

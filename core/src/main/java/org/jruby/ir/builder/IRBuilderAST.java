@@ -27,6 +27,7 @@ import org.jruby.ir.instructions.defined.RestoreErrorInfoInstr;
 import org.jruby.ir.interpreter.InterpreterContext;
 import org.jruby.ir.operands.Array;
 import org.jruby.ir.operands.Bignum;
+import org.jruby.ir.operands.ChilledString;
 import org.jruby.ir.operands.Complex;
 import org.jruby.ir.operands.Filename;
 import org.jruby.ir.operands.Float;
@@ -67,6 +68,8 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static org.jruby.api.Warn.warning;
+import static org.jruby.ir.builder.StringStyle.Frozen;
 import static org.jruby.ir.instructions.RuntimeHelperCall.Methods.*;
 
 import static org.jruby.ir.operands.ScopeModule.*;
@@ -122,7 +125,7 @@ import static org.jruby.runtime.ThreadContext.*;
 // this is not a big deal.  Think this through!
 
 public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyNode, Colon3Node, HashNode> {
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public static Node buildAST(boolean isCommandLineScript, String arg) {
         Ruby ruby = Ruby.getGlobalRuntime();
 
@@ -520,11 +523,14 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
     }
 
 
+    // Looks weird to see no key comparison but we know if this is called there are only kwrest value(s).
     private Operand buildRestKeywordArgs(HashNode keywordArgs, int[] flags) {
         flags[0] |= CALL_KEYWORD_REST;
         List<KeyValuePair<Node, Node>> pairs = keywordArgs.getPairs();
 
         if (pairs.size() == 1) { // Only a single rest arg here.  Do not bother to merge.
+            if (pairs.get(0).getValue() instanceof NilNode) return new Hash(new ArrayList<>()); // **nil
+
             Operand splat = buildWithOrder(pairs.get(0).getValue(), keywordArgs.containsVariableAssignment());
 
             return addResultInstr(new RuntimeHelperCall(temp(), HASH_CHECK, new Operand[] { splat }));
@@ -532,7 +538,9 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
 
         Variable splatValue = copy(new Hash(new ArrayList<>()));
         for (KeyValuePair<Node, Node> pair: pairs) {
-            Operand splat = buildWithOrder(pair.getValue(), keywordArgs.containsVariableAssignment());
+            Operand splat = pair.getValue() instanceof NilNode ?
+                    new Hash(new ArrayList<>()) : // **nil
+                    buildWithOrder(pair.getValue(), keywordArgs.containsVariableAssignment()); // **r
             addInstr(new RuntimeHelperCall(splatValue, MERGE_KWARGS, new Operand[] { splatValue, splat, fals() }));
         }
 
@@ -673,7 +681,7 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
                 addInstr(new PutClassVariableInstr(classVarDefinitionContainer(), ((ClassVarAsgnNode)node).getName(), rhsVal));
                 break;
             case CONSTDECLNODE:
-                buildConstDeclAssignment((ConstDeclNode) node, rhsVal);
+                buildConstDeclAssignment((ConstDeclNode) node, () -> rhsVal);
                 break;
             case DASGNNODE: {
                 DAsgnNode variable = (DAsgnNode) node;
@@ -743,7 +751,7 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
                         receiveBlockArg(temp(), argsArray, argIndex, isSplat)));
                 break;
             case CONSTDECLNODE:
-                buildConstDeclAssignment((ConstDeclNode) node, receiveBlockArg(temp(), argsArray, argIndex, isSplat));
+                buildConstDeclAssignment((ConstDeclNode) node, () -> receiveBlockArg(temp(), argsArray, argIndex, isSplat));
                 break;
             case GLOBALASGNNODE:
                 addInstr(new PutGlobalVarInstr(((GlobalAsgnNode)node).getName(),
@@ -916,7 +924,7 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
                 (arg0 = argsAry.get(0)) instanceof StrNode &&
 
                 // not pre-frozen (which can just go through normal call path)
-                !((StrNode) arg0).isFrozen() &&
+                ((StrNode) arg0).getStringStyle() != Frozen &&
 
                 // obj#[] definitely not refined
                 !scope.maybeUsingRefinements() &&
@@ -956,12 +964,12 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
             Operand key = build(pair.getKey());
             call(result, d, "key?", key);
             copy(errorString, key); // Sets to symbol which will not be nil or a regular string.
-            cond_ne(testEnd, result, tru());
+            cond_ne_true(testEnd, result);
 
             String method = hasRest ? "delete" : "[]";
             Operand value = call(temp(), d, method, key);
             buildPatternEach(testEnd, result, original, copy(nil()), value, pair.getValue(), inAlteration, isSinglePattern, errorString);
-            cond_ne(testEnd, result, tru());
+            cond_ne_true(testEnd, result);
         }
     }
 
@@ -1065,7 +1073,7 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
 
     @Override
     protected Operand frozen_string(Node node) {
-        ((StrNode) node).setFrozen(true);
+        ((StrNode) node).setStringStyle(Frozen);
         return buildStrRaw((StrNode) node);
     }
 
@@ -1098,7 +1106,9 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
         Variable eqqResult = temp();
         Node exprNodes = whenNode.getExpressionNodes();
 
-        if (exprNodes instanceof ListNode && !(exprNodes instanceof DNode) && !(exprNodes instanceof ArrayNode) && !(exprNodes instanceof ZArrayNode)) {
+        if (exprNodes instanceof BlockNode list) {
+            buildWhenValue(eqqResult, testValue, bodyLabel, list.getLast(), seenLiterals, origLocs, false);
+        } else if (exprNodes instanceof ListNode && !(exprNodes instanceof DNode) && !(exprNodes instanceof ArrayNode) && !(exprNodes instanceof ZArrayNode)) {
             buildWhenValues(eqqResult, ((ListNode) exprNodes).children(), testValue, bodyLabel, seenLiterals, origLocs);
         } else if (exprNodes instanceof ArgsPushNode || exprNodes instanceof SplatNode || exprNodes instanceof ArgsCatNode) {
             buildWhenSplatValues(eqqResult, exprNodes, testValue, bodyLabel, seenLiterals, origLocs);
@@ -1193,8 +1203,9 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
                 origTable.put((int) exprLong, whenNode);
                 nodeBodies.put(whenNode, bodyLabel);
             } else {
-                getManager().getRuntime().getWarnings().warning(IRubyWarnings.ID.MISCELLANEOUS, getFileName(), expr.getLine() + 1,
-                        "duplicated 'when' clause with line " + (origTable.get((int) exprLong).getLine() + 1) + " is ignored");
+                var context = getManager().getRuntime().getCurrentContext();
+                warning(context, "'when' clause on line " + (getLine(expr) + 1) +
+                        " duplicates 'when' clause on line " + (origTable.get((int) exprLong).getLine() + 1) + " and is ignored");
             }
         }
 
@@ -1320,17 +1331,27 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
     }
 
     public Operand buildConstDecl(ConstDeclNode node) {
-        return buildConstDeclAssignment(node, build(node.getValueNode()));
+        return buildConstDeclAssignment(node, () -> build(node.getValueNode()));
     }
 
-    public Operand buildConstDeclAssignment(ConstDeclNode constDeclNode, Operand value) {
+    public Operand buildConstDeclAssignment(ConstDeclNode constDeclNode, CodeBlock valueBuilder) {
         Node constNode = constDeclNode.getConstNode();
 
-        if (constNode == null) return putConstant(constDeclNode.getName(), value);
+        if (constNode == null) return putConstant(constDeclNode.getName(), valueBuilder.run());
 
-        return putConstant((Colon3Node) constNode, value);
+        return putConstant((Colon3Node) constNode, valueBuilder);
     }
 
+    protected Operand putConstant(Colon3Node colonNode, CodeBlock valueBuilder) {
+        if (colonNode.getNodeType() == NodeType.COLON2NODE) {
+            Colon2Node colon2Node = (Colon2Node) colonNode;
+            return putConstant(build(colon2Node.getLeftNode()), colon2Node.getName(), valueBuilder.run());
+        } else { // colon3, assign in Object
+            return putConstant(getManager().getObjectClass(), colonNode.getName(), valueBuilder.run());
+        }
+    }
+
+    @Deprecated(since = "10.0.0.0")
     protected Operand putConstant(Colon3Node colonNode, Operand value) {
         if (colonNode.getNodeType() == NodeType.COLON2NODE) {
             Colon2Node colon2Node = (Colon2Node) colonNode;
@@ -1648,6 +1669,49 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
             // Try verifying definition, and if we get an JumpException exception, process it with the rescue block above
             return protectCodeWithRescue(protectedCode, rescueBlock);
         }
+        case OPASGNCONSTDECLNODE:
+            return new FrozenString("assignment");
+
+        case SPLATNODE: {
+            SplatNode splat = (SplatNode) node;
+            Label undefLabel = getNewLabel();
+            Label doneLabel = getNewLabel();
+
+            Variable tmpVar = temp();
+            Operand result = buildGetDefinition(splat.getValue());
+
+            addInstr(createBranch(result, nil(), undefLabel));
+
+            addInstr(new CopyInstr(tmpVar, new FrozenString(DefinedMessage.EXPRESSION.getText())));
+            addInstr(new JumpInstr(doneLabel));
+            addInstr(new LabelInstr(undefLabel));
+            addInstr(new CopyInstr(tmpVar, nil()));
+            addInstr(new LabelInstr(doneLabel));
+
+            return tmpVar;
+        }
+
+        case HASHNODE: { // If all elts of hash are defined the array is as well
+            HashNode hash = (HashNode) node;
+            Label undefLabel = getNewLabel();
+            Label doneLabel = getNewLabel();
+
+            Variable tmpVar = temp();
+            for (Node elt: hash.childNodes()) {
+                Operand result = buildGetDefinition(elt);
+
+                addInstr(createBranch(result, nil(), undefLabel));
+            }
+
+            addInstr(new CopyInstr(tmpVar, new FrozenString(DefinedMessage.EXPRESSION.getText())));
+            addInstr(new JumpInstr(doneLabel));
+            addInstr(new LabelInstr(undefLabel));
+            addInstr(new CopyInstr(tmpVar, nil()));
+            addInstr(new LabelInstr(doneLabel));
+
+            return tmpVar;
+        }
+
         default:
             return new FrozenString("expression");
         }
@@ -1844,7 +1908,7 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
             // So, we generate an implicit arg name
             RestArgNode restArgNode = argsNode.getRestArgNode();
             if (scope instanceof IRMethod) {
-                addArgumentDescription(restArgNode.isAnonymous() ?
+                addArgumentDescription(restArgNode.isAnonymous() && restArgNode.getName() == null ?
                         ArgumentType.anonrest : ArgumentType.rest, restArgNode.getName());
             }
 
@@ -2134,7 +2198,7 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
     }
 
     public Operand buildDStr(Variable result, DStrNode node) {
-        return buildDStr(result, node.children(), node.getEncoding(), node.isFrozen(), node.getLine());
+        return buildDStr(result, node.children(), node.getEncoding(), node.getStringStyle(), node.getLine());
     }
 
     public Operand buildDSymbol(Variable result, DSymbolNode node) {
@@ -2194,6 +2258,18 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
     public Operand buildFCall(Variable result, FCallNode node) {
         if (result == null) result = temp();
         RubySymbol name = methodName = node.getName();
+
+        // special case methods with frame handling
+        String callName = name.idString();
+        switch (callName) {
+            case "block_given?":
+            case "iterator?":
+                if (node.getArgsNode() == null
+                        && node.getIterNode() == null) {
+                    addInstr(new BlockGivenCallInstr(result, getYieldClosureVariable(), callName));
+                    return result;
+                }
+        }
 
         return createCall(result, buildSelf(), FUNCTIONAL, name, node.getArgsNode(), node.getIterNode(),
                 node.getLine(), node.isNewline());
@@ -2256,6 +2332,7 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
 
             if (key == null) {                          // Splat kwarg [e.g. {**splat1, a: 1, **splat2)]
                 Node value = pair.getValue();
+                if (value instanceof NilNode) continue; // **nil contribute nothing to a heterogeneous hash of elements
                  duplicateCheck = value instanceof HashNode && ((HashNode) value).isLiteral() ? tru() : fals();
                 if (hash == null) {                     // No hash yet. Define so order is preserved.
                     hash = copy(new Hash(args));
@@ -2603,9 +2680,11 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
 
         int line = strNode.getLine();
 
-        if (strNode.isFrozen()) return new FrozenString(strNode.getValue(), strNode.getCodeRange(), scope.getFile(), line);
-
-        return new MutableString(strNode.getValue(), strNode.getCodeRange(), scope.getFile(), line);
+        switch(strNode.getStringStyle()) {
+            case Frozen -> { return new FrozenString(strNode.getValue(), strNode.getCodeRange(), scope.getFile(), line); }
+            case Mutable -> { return new MutableString(strNode.getValue(), strNode.getCodeRange(), scope.getFile(), line); }
+            default -> { return new ChilledString(strNode.getValue(), strNode.getCodeRange(), scope.getFile(), line); }
+        }
     }
 
     public Operand buildSuper(Variable result, SuperNode node) {
@@ -2634,6 +2713,22 @@ public class IRBuilderAST extends IRBuilder<Node, DefNode, WhenNode, RescueBodyN
     }
 
     public Operand buildVCall(Variable result, VCallNode node) {
+        if (result == null) result = temp();
+
+        RubySymbol name = methodName = node.getName();
+
+        // special case methods with frame handling
+        String callName = name.idString();
+        switch (callName) {
+            case "__method__":
+            case "__callee__":
+                // narrow to methods until we can fix other scopes' frame names
+                if (scope instanceof IRMethod) {
+                    addInstr(new FrameNameCallInstr(result, callName));
+                    return result;
+                }
+        }
+
         return _call(result, VARIABLE, buildSelf(), node.getName());
     }
 

@@ -100,7 +100,7 @@ public class JavaEmbedUtils {
             }
 
             public IRubyObject[] convertToJavaArray(IRubyObject array) {
-                return ((RubyArray) array).toJavaArray();
+                return ((RubyArray<?>) array).toJavaArray(array.getRuntime().getCurrentContext());
             }
 
             public RubyInteger convertToRubyInteger(IRubyObject obj) {
@@ -204,7 +204,7 @@ public class JavaEmbedUtils {
             this.result = result;
         }
 
-        @Deprecated
+        @Deprecated(since = "9.4.6.0")
         protected InterpretedEvalUnit(Ruby runtime, Node node) {
             this(runtime, (ParseResult) node);
         }
@@ -258,7 +258,7 @@ public class JavaEmbedUtils {
         return value.toJava(type);
     }
 
-    // @Deprecated
+    // @Deprecated(since = "9.4.1.0")
     public static <T> T rubyToJava(Ruby runtime, IRubyObject value, Class<T> type) {
         return value.toJava(type);
     }

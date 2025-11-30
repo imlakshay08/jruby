@@ -32,23 +32,32 @@ import java.nio.ByteOrder;
 import org.jcodings.specific.ASCIIEncoding;
 import org.jruby.Ruby;
 import org.jruby.RubyArray;
-import org.jruby.RubyBoolean;
 import org.jruby.RubyClass;
 import org.jruby.RubyFixnum;
 import org.jruby.RubyFloat;
 import org.jruby.RubyModule;
-import org.jruby.RubyNumeric;
-import org.jruby.RubyObject;
-import org.jruby.RubyString;
 import org.jruby.RubySymbol;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
+import org.jruby.api.Create;
 import org.jruby.internal.runtime.methods.DynamicMethod;
 import org.jruby.runtime.Arity;
-import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.ByteList;
+
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.asSymbol;
+import static org.jruby.api.Convert.toInt;
+import static org.jruby.api.Convert.toLong;
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newEmptyString;
+import static org.jruby.api.Error.argumentError;
+import static org.jruby.api.Error.indexError;
+import static org.jruby.api.Error.rangeError;
+import static org.jruby.api.Error.typeError;
+import static org.jruby.runtime.ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR;
 
 /**
  * A abstract memory object that defines operations common to both pointers and
@@ -64,54 +73,35 @@ abstract public class AbstractMemory extends MemoryObject {
     /** The size of each element of this memory area - e.g. :char is 1, :int is 4 */
     protected int typeSize;
 
-    public static RubyClass createAbstractMemoryClass(Ruby runtime, RubyModule module) {
-        RubyClass result = module.defineClassUnder(ABSTRACT_MEMORY_RUBY_CLASS,
-                runtime.getObject(),
-                ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);
-        
-        result.defineAnnotatedMethods(AbstractMemory.class);
-        result.defineAnnotatedConstants(AbstractMemory.class);
-
-        return result;
+    public static RubyClass createAbstractMemoryClass(ThreadContext context, RubyModule FFI, RubyClass Object) {
+        return FFI.defineClassUnder(context, ABSTRACT_MEMORY_RUBY_CLASS, Object, NOT_ALLOCATABLE_ALLOCATOR).
+                defineMethods(context, AbstractMemory.class).
+                defineConstants(context, AbstractMemory.class);
     }
     
     protected static final int calculateTypeSize(ThreadContext context, IRubyObject sizeArg) {
-        if (sizeArg instanceof RubyFixnum) {
-            return (int) ((RubyFixnum) sizeArg).getLongValue();
-
-        } else if (sizeArg instanceof RubySymbol) {
-            return TypeSizeMapper.getTypeSize(context, (RubySymbol) sizeArg);
-
-        } else if (sizeArg instanceof Type) {
-            return ((Type) sizeArg).getNativeSize();
-
-        } else {
-            DynamicMethod sizeMethod;
-            if (sizeArg instanceof RubyClass && Struct.isStruct(context.runtime, (RubyClass) sizeArg)) {
-                return Struct.getStructSize(context.runtime, sizeArg);
-
-            } else if (!(sizeMethod = sizeArg.getMetaClass().searchMethod("size")).isUndefined()) {
-                return (int) RubyFixnum.num2long(sizeMethod.call(context, sizeArg, sizeArg.getMetaClass(), "size"));
-
-            } else {
-                throw context.runtime.newArgumentError("Invalid size argument");
+        return switch (sizeArg) {
+            case RubyFixnum fix -> fix.asInt(context);
+            case RubySymbol sym -> TypeSizeMapper.getTypeSize(context, sym);
+            case Type type -> type.getNativeSize();
+            case RubyClass cls when Struct.isStruct(context, cls) -> Struct.getStructSize(context, sizeArg);
+            default -> {
+                DynamicMethod sizeMethod = sizeArg.getMetaClass().searchMethod("size");
+                if (sizeMethod.isUndefined()) throw argumentError(context, "Invalid size argument");
+                yield toInt(context, sizeMethod.call(context, sizeArg, sizeArg.getMetaClass(), "size"));
             }
-        }
+        };
     }
 
     protected static final RubyArray checkArray(IRubyObject obj) {
-        if (!(obj instanceof RubyArray)) {
-            throw obj.getRuntime().newTypeError("Array expected");
-        }
-        return (RubyArray) obj;
+        if (obj instanceof RubyArray arr) return arr;
+
+        throw typeError(obj.getRuntime().getCurrentContext(), "Array expected");
     }
 
-    private static int checkArrayLength(IRubyObject val) {
-        int i = RubyNumeric.num2int(val);
-        if (i < 0) {
-            throw val.getRuntime().newIndexError("negative array length (" + i + ")");
-        }
-
+    private static int checkArrayLength(ThreadContext context, IRubyObject val) {
+        int i = toInt(context, val);
+        if (i < 0) throw indexError(context, "negative array length (" + i + ")");
         return i;
     }
 
@@ -127,11 +117,8 @@ abstract public class AbstractMemory extends MemoryObject {
     }
 
     static AbstractMemory cast(ThreadContext context, IRubyObject ptr) {
-        if (!(ptr instanceof AbstractMemory)) {
-            throw context.runtime.newTypeError(ptr, context.runtime.getFFI().memoryClass);
-        }
-
-        return (AbstractMemory) ptr;
+        if (ptr instanceof AbstractMemory memory) return memory;
+        throw typeError(context, ptr, context.runtime.getFFI().memoryClass);
     }
 
     @Override
@@ -166,16 +153,15 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = "hash")
     public RubyFixnum hash(ThreadContext context) {
-        return context.runtime.newFixnum(hashCode());
+        return asFixnum(context, hashCode());
     }
 
     @JRubyMethod(name = "[]")
     public final IRubyObject aref(ThreadContext context, IRubyObject indexArg) {
-        final int index = RubyNumeric.num2int(indexArg);
+        final int index = toInt(context, indexArg);
         final int offset = index * typeSize;
-        if (offset >= size) {
-            throw context.runtime.newIndexError(String.format("Index %d out of range", index));
-        }
+        if (offset >= size) throw indexError(context, String.format("Index %d out of range", index));
+
         return slice(context.runtime, offset);
     }
 
@@ -188,17 +174,13 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @Override
     public boolean equals(Object obj) {
-        if (!(obj instanceof AbstractMemory)) {
-            return false;
-        }
-        final AbstractMemory other = (AbstractMemory) obj;
-        return other.getMemoryIO().equals(getMemoryIO());
+        return obj instanceof AbstractMemory other && other.getMemoryIO().equals(getMemoryIO());
     }
     
     @JRubyMethod(name = "==")
     @Override
     public IRubyObject op_equal(ThreadContext context, IRubyObject obj) {
-        return RubyBoolean.newBoolean(context, this.equals(obj));
+        return asBoolean(context, this.equals(obj));
     }
     
     /**
@@ -213,6 +195,8 @@ abstract public class AbstractMemory extends MemoryObject {
 
     /**
      * Clears (zeros out) the memory contents.
+     * @param context the thread context
+     * @return this
      */
     @JRubyMethod(name = "clear")
     public IRubyObject clear(ThreadContext context) {
@@ -223,27 +207,29 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Gets the total size (in bytes) of the Memory.
      *
+     * @param context the thread context
      * @return The total size in bytes.
      */
     @JRubyMethod(name = { "total", "size", "length" })
     public IRubyObject total(ThreadContext context) {
-        return RubyFixnum.newFixnum(context.runtime, size);
+        return asFixnum(context, size);
     }
     
     /**
      * Indicates how many bytes the intrinsic type of the memory uses.
      *
-     * @param context
-     * @return
+     * @param context the thread context
+     * @return the type size
      */
     @JRubyMethod(name = "type_size")
     public final IRubyObject type_size(ThreadContext context) {
-        return context.runtime.newFixnum(typeSize);
+        return asFixnum(context, typeSize);
     }
 
     /**
      * Writes a 8 bit signed integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -257,6 +243,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 8 bit signed integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -270,6 +257,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 8 bit signed integer value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -284,6 +272,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads an 8 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_char" })
@@ -294,6 +283,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads an 8 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_int8", "get_char" })
@@ -304,6 +294,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads an 8 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -315,6 +306,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 8 bit unsigned integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -327,6 +319,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 8 bit unsigned integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -339,6 +332,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 8 bit unsigned integer value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -352,6 +346,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads an 8 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_uchar" })
@@ -362,6 +357,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads an 8 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_uint8", "get_uchar" })
@@ -372,6 +368,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads an 8 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -383,6 +380,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 16 bit signed integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -396,6 +394,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 16 bit signed integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -409,6 +408,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 16 bit signed integer value to the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -423,6 +423,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 16 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_short" })
@@ -433,6 +434,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 16 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_int16", "get_short" })
@@ -443,6 +445,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 16 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -454,6 +457,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 16 bit unsigned integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -467,6 +471,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 16 bit unsigned integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -480,6 +485,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 16 bit unsigned integer value to the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -494,6 +500,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 16 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_ushort" })
@@ -504,6 +511,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 16 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_uint16", "get_ushort" })
@@ -514,6 +522,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 16 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -525,6 +534,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 32 bit signed integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -538,6 +548,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 32 bit signed integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -551,6 +562,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 32 bit signed integer value to the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -565,6 +577,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_int", "read_int32" })
@@ -575,6 +588,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_int32", "get_int" })
@@ -585,6 +599,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit signed integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -596,6 +611,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 32 bit unsigned integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -609,6 +625,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 32 bit unsigned integer value to the memory address.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -622,6 +639,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 32 bit unsigned integer value to the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -636,6 +654,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 8 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_uint8" })
@@ -646,6 +665,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 16 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_uint16" })
@@ -656,6 +676,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_uint", "read_uint32" })
@@ -666,6 +687,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_uint32", "get_uint" })
@@ -676,6 +698,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -687,6 +710,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 64 bit integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -700,6 +724,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 64 bit integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -713,6 +738,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 64 bit integer value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -727,6 +753,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_int64", "read_long_long" })
@@ -737,6 +764,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_int64", "get_long_long" })
@@ -747,6 +775,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -758,6 +787,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 64 bit unsigned integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -771,6 +801,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 64 bit unsigned integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -784,6 +815,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a 64 bit unsigned integer value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -798,6 +830,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_uint64", "read_ulong_long" })
@@ -808,6 +841,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_uint64", "get_ulong_long" })
@@ -818,6 +852,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit unsigned integer value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -830,6 +865,7 @@ abstract public class AbstractMemory extends MemoryObject {
      * Writes a C long integer value to the memory area. This version is added
      * to support the "write_long" alias for the single-arg "put_long".
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -841,6 +877,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a C long integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -854,6 +891,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a C long integer value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -868,6 +906,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a C long integer value from the memory area.
      *
+     * @param context the thread context
      * @return The value read.
      */
     @JRubyMethod(name = { "read_long" })
@@ -878,6 +917,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a C long integer value from the memory area.
      *
+     * @param context the thread context
      * @return The value read.
      */
     @JRubyMethod(name = { "get_long" })
@@ -889,6 +929,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a C long integer value from the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read.
      */
@@ -902,6 +943,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a C long integer value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
@@ -915,6 +957,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes a C long integer value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
@@ -930,6 +973,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a C unsigned long integer value from the memory area.
      *
+     * @param context the thread context
      * @return The value read.
      */
     @JRubyMethod(name = { "read_ulong" })
@@ -940,6 +984,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a C unsigned long integer value from the memory area.
      *
+     * @param context the thread context
      * @return The value read.
      */
     @JRubyMethod(name = { "get_ulong", "read_ulong" })
@@ -951,6 +996,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a C unsigned long integer value from the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read.
      */
@@ -964,12 +1010,13 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 32 bit floating point value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
     @JRubyMethod(name = { "write_float" })
     public IRubyObject write_float(ThreadContext context, IRubyObject value) {
-        getMemoryIO().putFloat(0, Util.floatValue(value));
+        getMemoryIO().putFloat(0, Util.floatValue(context, value));
 
         return this;
     }
@@ -977,12 +1024,13 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 32 bit floating point value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
     @JRubyMethod(name = { "put_float32", "put_float" })
     public IRubyObject put_float32(ThreadContext context, IRubyObject value) {
-        getMemoryIO().putFloat(0, Util.floatValue(value));
+        getMemoryIO().putFloat(0, Util.floatValue(context, value));
 
         return this;
     }
@@ -990,13 +1038,14 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 32 bit floating point value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
      */
     @JRubyMethod(name = { "put_float32", "put_float" })
     public IRubyObject put_float32(ThreadContext context, IRubyObject offset, IRubyObject value) {
-        getMemoryIO().putFloat(getOffset(offset), Util.floatValue(value));
+        getMemoryIO().putFloat(getOffset(offset), Util.floatValue(context, value));
 
         return this;
     }
@@ -1004,6 +1053,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit floating point value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_float" })
@@ -1014,6 +1064,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit floating point value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_float32", "get_float" })
@@ -1024,6 +1075,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 32 bit floating point value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -1035,12 +1087,13 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 64 bit floating point value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
     @JRubyMethod(name = { "write_double" })
     public IRubyObject write_double(ThreadContext context, IRubyObject value) {
-        getMemoryIO().putDouble(0, Util.doubleValue(value));
+        getMemoryIO().putDouble(0, Util.doubleValue(context, value));
 
         return this;
     }
@@ -1048,12 +1101,13 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 64 bit floating point value to the memory area.
      *
+     * @param context the thread context
      * @param value The value to write.
      * @return The value written.
      */
     @JRubyMethod(name = { "put_float64", "put_double" })
     public IRubyObject put_float64(ThreadContext context, IRubyObject value) {
-        getMemoryIO().putDouble(0, Util.doubleValue(value));
+        getMemoryIO().putDouble(0, Util.doubleValue(context, value));
 
         return this;
     }
@@ -1061,13 +1115,14 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Writes an 64 bit floating point value to the memory area.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to write the value.
      * @param value The value to write.
      * @return The value written.
      */
     @JRubyMethod(name = { "put_float64", "put_double" })
     public IRubyObject put_float64(ThreadContext context, IRubyObject offset, IRubyObject value) {
-        getMemoryIO().putDouble(getOffset(offset), Util.doubleValue(value));
+        getMemoryIO().putDouble(getOffset(offset), Util.doubleValue(context, value));
 
         return this;
     }
@@ -1075,6 +1130,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit floating point value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "read_double" })
@@ -1085,6 +1141,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit floating point value from the memory address.
      *
+     * @param context the thread context
      * @return The value read from the address.
      */
     @JRubyMethod(name = { "get_float64", "get_double" })
@@ -1095,6 +1152,7 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads a 64 bit floating point value from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the base pointer address to read the value.
      * @return The value read from the address.
      */
@@ -1106,13 +1164,14 @@ abstract public class AbstractMemory extends MemoryObject {
     /**
      * Reads an array of signed 8 bit integer values from the memory address.
      *
+     * @param context the thread context
      * @param offset The offset from the start of the memory area to read the values.
      * @param length The number of values to be read from memory.
      * @return An array containing the values.
      */
     @JRubyMethod(name = { "get_array_of_int8", "get_array_of_char" })
     public IRubyObject get_array_of_int8(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned8(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned8(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1126,7 +1185,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "put_array_of_int8", "put_array_of_char" })
     public IRubyObject put_array_of_int8(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
 
-        MemoryUtil.putArrayOfSigned8(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfSigned8(getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1141,7 +1200,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_uint8", "get_array_of_uchar" })
     public IRubyObject get_array_of_uint8(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned8(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned8(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1155,7 +1214,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "put_array_of_uint8", "put_array_of_uchar" })
     public IRubyObject put_array_of_uint8(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
 
-        MemoryUtil.putArrayOfUnsigned8(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfUnsigned8(getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1170,7 +1229,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_int16", "get_array_of_short" })
     public IRubyObject get_array_of_int16(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned16(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned16(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1184,7 +1243,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "put_array_of_int16", "put_array_of_short" })
     public IRubyObject put_array_of_int16(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
 
-        MemoryUtil.putArrayOfSigned16(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfSigned16(getMemoryIO(), getOffset(offset), checkArray(arrParam));
         
         return this;
     }
@@ -1199,7 +1258,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_uint16", "get_array_of_ushort" })
     public IRubyObject get_array_of_uint16(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned16(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned16(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1213,7 +1272,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "put_array_of_uint16", "put_array_of_ushort" })
     public IRubyObject put_array_of_uint16(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
 
-        MemoryUtil.putArrayOfUnsigned16(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfUnsigned16(getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1228,7 +1287,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_int32", "get_array_of_int" })
     public IRubyObject get_array_of_int32(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned32(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned32(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1241,7 +1300,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "put_array_of_int32", "put_array_of_int" })
     public IRubyObject put_array_of_int32(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
-        MemoryUtil.putArrayOfSigned32(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfSigned32(getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1256,7 +1315,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_uint32", "get_array_of_uint" })
     public IRubyObject get_array_of_uint32(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned32(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned32(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1269,7 +1328,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "put_array_of_uint32", "put_array_of_uint" })
     public IRubyObject put_array_of_uint32(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
-        MemoryUtil.putArrayOfUnsigned32(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfUnsigned32(getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1344,7 +1403,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_int64", "get_array_of_long_long" })
     public IRubyObject get_array_of_int64(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned64(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned64(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1358,7 +1417,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "put_array_of_int64", "put_array_of_long_long" })
     public IRubyObject put_array_of_int64(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
 
-        MemoryUtil.putArrayOfSigned64(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfSigned64(getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1373,7 +1432,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_uint64", "get_array_of_ulong_long" })
     public IRubyObject get_array_of_uint64(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned64(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned64(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1387,7 +1446,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "put_array_of_uint64", "put_array_of_ulong_long" })
     public IRubyObject put_array_of_uint64(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
 
-        MemoryUtil.putArrayOfUnsigned64(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfUnsigned64(getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1402,7 +1461,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_float32", "get_array_of_float" })
     public IRubyObject get_array_of_float(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfFloat32(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfFloat32(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1416,7 +1475,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "put_array_of_float32", "put_array_of_float" })
     public IRubyObject put_array_of_float(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
 
-        MemoryUtil.putArrayOfFloat32(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfFloat32(context, getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1431,7 +1490,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "get_array_of_float64", "get_array_of_double" })
     public IRubyObject get_array_of_float64(ThreadContext context, IRubyObject offset, IRubyObject length) {
-        return MemoryUtil.getArrayOfFloat64(context.runtime, getMemoryIO(), getOffset(offset), Util.int32Value(length));
+        return MemoryUtil.getArrayOfFloat64(context, getMemoryIO(), getOffset(offset), Util.int32Value(length));
     }
 
     /**
@@ -1444,7 +1503,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "put_array_of_float64", "put_array_of_double" })
     public IRubyObject put_array_of_float64(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
-        MemoryUtil.putArrayOfFloat64(context.runtime, getMemoryIO(), getOffset(offset), checkArray(arrParam));
+        MemoryUtil.putArrayOfFloat64(context, getMemoryIO(), getOffset(offset), checkArray(arrParam));
 
         return this;
     }
@@ -1458,7 +1517,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_int8", "read_array_of_char" })
     public IRubyObject read_array_of_int8(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned8(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned8(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1471,7 +1530,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_int8", "write_array_of_char" })
     public IRubyObject write_array_of_int8(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfSigned8(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfSigned8(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1485,7 +1544,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_uint8", "read_array_of_uchar" })
     public IRubyObject read_array_of_uint8(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned8(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned8(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1498,7 +1557,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_uint8", "write_array_of_uchar" })
     public IRubyObject write_array_of_uint8(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfUnsigned8(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfUnsigned8(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1512,7 +1571,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_int16", "read_array_of_short" })
     public IRubyObject read_array_of_int16(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned16(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned16(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1525,7 +1584,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_int16", "write_array_of_short" })
     public IRubyObject write_array_of_int16(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfSigned16(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfSigned16(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1539,7 +1598,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_uint16", "read_array_of_ushort" })
     public IRubyObject read_array_of_uint16(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned16(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned16(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1552,7 +1611,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_uint16", "write_array_of_ushort" })
     public IRubyObject write_array_of_uint16(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfUnsigned16(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfUnsigned16(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1567,7 +1626,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_int32", "read_array_of_int" })
     public IRubyObject read_array_of_int32(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned32(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned32(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1580,7 +1639,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_int32", "write_array_of_int" })
     public IRubyObject write_array_of_int32(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfSigned32(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfSigned32(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1594,7 +1653,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_uint32", "read_array_of_uint" })
     public IRubyObject read_array_of_uint32(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned32(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned32(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1607,7 +1666,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_uint32", "write_array_of_uint" })
     public IRubyObject write_array_of_uint32(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfUnsigned32(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfUnsigned32(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1621,7 +1680,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_int64", "read_array_of_long_long" })
     public IRubyObject read_array_of_int64(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfSigned64(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfSigned64(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1634,7 +1693,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_int64", "write_array_of_long_long" })
     public IRubyObject write_array_of_int64(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfSigned64(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfSigned64(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1648,7 +1707,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_uint64", "read_array_of_ulong_long" })
     public IRubyObject read_array_of_uint64(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfUnsigned64(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfUnsigned64(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1661,7 +1720,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_uint64", "write_array_of_ulong_long" })
     public IRubyObject write_array_of_uint64(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfUnsigned64(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfUnsigned64(getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1731,7 +1790,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_float32", "read_array_of_float" })
     public IRubyObject read_array_of_float(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfFloat32(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfFloat32(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1744,7 +1803,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "write_array_of_float32", "write_array_of_float" })
     public IRubyObject write_array_of_float(ThreadContext context, IRubyObject ary) {
 
-        MemoryUtil.putArrayOfFloat32(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfFloat32(context, getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1758,7 +1817,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "read_array_of_float64", "read_array_of_double" })
     public IRubyObject read_array_of_float64(ThreadContext context, IRubyObject length) {
-        return MemoryUtil.getArrayOfFloat64(context.runtime, getMemoryIO(), 0, Util.int32Value(length));
+        return MemoryUtil.getArrayOfFloat64(context, getMemoryIO(), 0, Util.int32Value(length));
     }
 
     /**
@@ -1770,7 +1829,7 @@ abstract public class AbstractMemory extends MemoryObject {
      */
     @JRubyMethod(name = { "write_array_of_float64", "write_array_of_double" })
     public IRubyObject write_array_of_float64(ThreadContext context, IRubyObject ary) {
-        MemoryUtil.putArrayOfFloat64(context.runtime, getMemoryIO(), 0, checkArray(ary));
+        MemoryUtil.putArrayOfFloat64(context, getMemoryIO(), 0, checkArray(ary));
 
         return this;
     }
@@ -1779,18 +1838,16 @@ abstract public class AbstractMemory extends MemoryObject {
     public IRubyObject read_array_of_type(ThreadContext context, IRubyObject typeArg, IRubyObject lenArg) {
         Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeArg);
         MemoryOp op = MemoryOp.getMemoryOp(type);
-        if (op == null) {
-            throw context.runtime.newTypeError("cannot get memory reader for type " + type);
-        }
+        if (op == null) throw typeError(context, "cannot get memory reader for type " + type);
 
-        int len = checkArrayLength(lenArg);
-        RubyArray arr = RubyArray.newArray(context.runtime, len);
+        int len = checkArrayLength(context, lenArg);
 
+        var objArray = new IRubyObject[len];
         for (int i = 0, off = 0; i < len; i++, off += type.size) {
-            arr.add(op.get(context, getMemoryIO(), off));
+            objArray[i] = op.get(context, getMemoryIO(), off);
         }
 
-        return arr;
+        return Create.newArrayNoCopy(context, objArray);
     }
 
     @JRubyMethod(name = { "read_array_of_type" })
@@ -1798,23 +1855,21 @@ abstract public class AbstractMemory extends MemoryObject {
         Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeArg);
         DynamicMethod method = getMetaClass().searchMethod(reader.asJavaString());
         
-        int len = checkArrayLength(lenArg);
-        RubyArray arr = RubyArray.newArray(context.runtime, len);
+        int len = checkArrayLength(context, lenArg);
 
+        var objArray = new IRubyObject[len];
         for (int i = 0, off = 0; i < len; i++, off += type.size) {
-            arr.add(method.call(context, this.slice(context.runtime, off, type.size), this.getMetaClass(), reader.asJavaString()));
+            objArray[i] = method.call(context, this.slice(context.runtime, off, type.size), this.getMetaClass(), reader.asJavaString());
         }
 
-        return arr;
+        return Create.newArrayNoCopy(context, objArray);
     }
 
     @JRubyMethod(name = { "write_array_of_type" })
     public IRubyObject write_array_of_type(ThreadContext context, IRubyObject typeArg, IRubyObject aryArg) {
         Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeArg);
         MemoryOp op = MemoryOp.getMemoryOp(type);
-        if (op == null) {
-            throw context.runtime.newTypeError("cannot get memory writer for type " + type);
-        }
+        if (op == null) throw typeError(context, "cannot get memory writer for type " + type);
 
         RubyArray arr = aryArg.convertToArray();
         int len = arr.size();
@@ -1851,18 +1906,12 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = "read_string")
     public IRubyObject read_string(ThreadContext context, IRubyObject rbLength) {
         /* When a length is given, read_string acts like get_bytes */
-        if (rbLength.isNil()) {
-            return MemoryUtil.getTaintedString(context.runtime, getMemoryIO(), 0);
-        } else {
-            int len = Util.int32Value(rbLength);
-            if (len == 0) {
-                RubyString rstr = RubyString.newEmptyString(context.runtime);
-                rstr.setEncoding(ASCIIEncoding.INSTANCE);
-                return rstr;
-            } else {
-                return MemoryUtil.getTaintedByteString(context.runtime, getMemoryIO(), 0, len);
-            }
-        }
+        if (rbLength.isNil()) return MemoryUtil.getTaintedString(context.runtime, getMemoryIO(), 0);
+
+        int len = Util.int32Value(rbLength);
+        return len != 0 ?
+                MemoryUtil.getTaintedByteString(context.runtime, getMemoryIO(), 0, len) :
+                newEmptyString(context, ASCIIEncoding.INSTANCE);
     }
 
     @JRubyMethod(name = "get_string")
@@ -1884,16 +1933,13 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = { "get_array_of_string" })
     public IRubyObject get_array_of_string(ThreadContext context, IRubyObject rbOffset) {
         final int POINTER_SIZE = (Platform.getPlatform().addressSize() / 8);
-
-        final Ruby runtime = context.runtime;
-        final RubyArray arr = RubyArray.newArray(runtime);
+        final RubyArray arr = newArray(context);
 
         for (long off = getOffset(rbOffset); off <= size - POINTER_SIZE; off += POINTER_SIZE) {
             final MemoryIO mem = getMemoryIO().getMemoryIO(off);
-            if (mem == null || mem.isNull()) {
-                break;
-            }
-            arr.add(MemoryUtil.getTaintedString(runtime, mem, 0));
+            if (mem == null || mem.isNull()) break;
+
+            arr.add(MemoryUtil.getTaintedString(context.runtime, mem, 0));
         }
 
         return arr;
@@ -1905,17 +1951,13 @@ abstract public class AbstractMemory extends MemoryObject {
         final long off = getOffset(rbOffset);
         final int count = Util.int32Value(rbCount);
 
-        final Ruby runtime = context.runtime;
-        final RubyArray arr = RubyArray.newArray(runtime, count);
-
+        var objArray = new IRubyObject[count];
         for (int i = 0; i < count; ++i) {
             final MemoryIO mem = getMemoryIO().getMemoryIO(off + (i * POINTER_SIZE));
-            arr.add(mem != null && !mem.isNull()
-                    ? MemoryUtil.getTaintedString(runtime, mem, 0)
-                    : runtime.getNil());
+            objArray[i] = mem != null && !mem.isNull() ? MemoryUtil.getTaintedString(context.runtime, mem, 0) : context.nil;
         }
 
-        return arr;
+        return Create.newArrayNoCopy(context, objArray);
     }
     
     @JRubyMethod(name = { "read_array_of_string" })
@@ -1948,8 +1990,7 @@ abstract public class AbstractMemory extends MemoryObject {
     @JRubyMethod(name = "write_string")
     public IRubyObject write_string(ThreadContext context, IRubyObject strArg, IRubyObject lenArg) {
         ByteList bl = strArg.convertToString().getByteList();
-        getMemoryIO().put(0, bl.getUnsafeBytes(), bl.begin(),
-                Math.min(bl.length(), (int) org.jruby.RubyInteger.num2long(lenArg)));
+        getMemoryIO().put(0, bl.getUnsafeBytes(), bl.begin(), Math.min(bl.length(), toInt(context, lenArg)));
         return this;
     }
 
@@ -1960,13 +2001,8 @@ abstract public class AbstractMemory extends MemoryObject {
     }
 
     private IRubyObject putBytes(ThreadContext context, long off, ByteList bl, int idx, int len) {
-        if (idx < 0) {
-            throw context.runtime.newRangeError("index can not be less than zero");
-        }
-
-        if ((idx + len) > bl.length()) {
-            throw context.runtime.newRangeError("index+length is greater than size of string");
-        }
+        if (idx < 0) throw rangeError(context, "index can not be less than zero");
+        if ((idx + len) > bl.length()) throw rangeError(context, "index+length is greater than size of string");
 
         getMemoryIO().put(off, bl.getUnsafeBytes(), bl.begin() + idx, len);
 
@@ -2018,17 +2054,14 @@ abstract public class AbstractMemory extends MemoryObject {
     private void putPointer(ThreadContext context, long offset, IRubyObject value) {
         DynamicMethod conversionMethod;
         
-        if (value instanceof Pointer) {
-            putPointer(context, offset, (Pointer) value);
-        
+        if (value instanceof Pointer ptr) {
+            putPointer(context, offset, ptr);
         } else if (value.isNil()) {
             getMemoryIO().putAddress(offset, 0L);
-        
         } else if (!(conversionMethod = value.getMetaClass().searchMethod("to_ptr")).isUndefined()) {
             putPointer(context, offset, conversionMethod.call(context, value, value.getMetaClass(), "to_ptr"));
-        
         } else {
-            throw context.runtime.newTypeError(value, context.runtime.getFFI().pointerClass);
+            throw typeError(context, value, context.runtime.getFFI().pointerClass);
         }
     }
 
@@ -2039,7 +2072,7 @@ abstract public class AbstractMemory extends MemoryObject {
         } else if (ptr.isNull()) {
             getMemoryIO().putAddress(offset, 0L);
         } else {
-            throw context.runtime.newArgumentError("Cannot convert argument to pointer");
+            throw argumentError(context, "Cannot convert argument to pointer");
         }
     }
 
@@ -2065,21 +2098,22 @@ abstract public class AbstractMemory extends MemoryObject {
     public IRubyObject get_array_of_pointer(ThreadContext context, IRubyObject offset, IRubyObject length) {
         final int POINTER_SIZE = (Platform.getPlatform().addressSize / 8);
         int count = Util.int32Value(length);
-        Ruby runtime = context.runtime;
-        RubyArray arr = RubyArray.newArray(runtime, count);
         long off = getOffset(offset);
 
+        Ruby runtime = context.runtime;
+
+        var objArray = new IRubyObject[count];
         for (int i = 0; i < count; ++i) {
-            arr.add(getPointer(runtime, off + (i * POINTER_SIZE)));
+            objArray[i] = getPointer(runtime, off + i * POINTER_SIZE);
         }
 
-        return arr;
+        return Create.newArrayNoCopy(context, objArray);
     }
 
     @JRubyMethod(name = { "put_array_of_pointer" })
     public IRubyObject put_array_of_pointer(ThreadContext context, IRubyObject offset, IRubyObject arrParam) {
         final int POINTER_SIZE = (Platform.getPlatform().addressSize / 8);
-        final RubyArray arr = (RubyArray) arrParam;
+        final var arr = (RubyArray<?>) arrParam;
         final int count = arr.getLength();
 
         long off = getOffset(offset);
@@ -2103,32 +2137,27 @@ abstract public class AbstractMemory extends MemoryObject {
 
     @JRubyMethod(name = "put_callback")
     public IRubyObject put_callback(ThreadContext context, IRubyObject offset, IRubyObject proc, IRubyObject cbInfo) {
-        if (!(cbInfo instanceof CallbackInfo)) {
-            throw context.runtime.newArgumentError("invalid CallbackInfo");
-        }
-        Pointer ptr = Factory.getInstance().getCallbackManager().getCallback(context.runtime, (CallbackInfo) cbInfo, proc);
-        getMemoryIO().putMemoryIO(getOffset(offset), ((AbstractMemory) ptr).getMemoryIO());
+        if (!(cbInfo instanceof CallbackInfo info)) throw argumentError(context, "invalid CallbackInfo");
+
+        Pointer ptr = Factory.getInstance().getCallbackManager().getCallback(context, info, proc);
+        getMemoryIO().putMemoryIO(getOffset(offset), ptr.getMemoryIO());
         return this;
     }
     
     @JRubyMethod(name = "+")
     public IRubyObject op_plus(ThreadContext context, IRubyObject value) {
-        return slice(context.runtime, RubyNumeric.fix2long(value));
+        return slice(context.runtime, toLong(context, value));
     }
 
     @JRubyMethod(name = "order")
     public final IRubyObject order(ThreadContext context) {
-        return context.runtime.newSymbol(getMemoryIO().order().equals(ByteOrder.LITTLE_ENDIAN) ? "little" : "big");
+        return asSymbol(context, getMemoryIO().order().equals(ByteOrder.LITTLE_ENDIAN) ? "little" : "big");
     }
 
     @JRubyMethod(name = "order")
     public final IRubyObject order(ThreadContext context, IRubyObject byte_order) {
         ByteOrder newOrder = Util.parseByteOrder(context.runtime, byte_order);
-        if (getMemoryIO().order().equals(newOrder)) {
-            return this; // no change
-        } else {
-            return order(context.runtime, newOrder);
-        }
+        return getMemoryIO().order().equals(newOrder) ? this : order(context.runtime, newOrder);
     }
 
     @JRubyMethod(name = "to_ptr")
@@ -2138,36 +2167,29 @@ abstract public class AbstractMemory extends MemoryObject {
     
     @JRubyMethod(name = "slice")
     public final IRubyObject slice(ThreadContext context, IRubyObject offset, IRubyObject size) {
-        return slice(context.getRuntime(), RubyNumeric.num2int(offset), RubyNumeric.num2int(size));
+        return slice(context.getRuntime(), toInt(context, offset), toInt(context, size));
     }
 
     @JRubyMethod(name = "get")
     public final IRubyObject put(ThreadContext context, IRubyObject typeName, IRubyObject offset) {
-        Ruby runtime = context.runtime;
+        Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeName);
 
-        Type type = runtime.getFFI().getTypeResolver().findType(runtime, typeName);
         MemoryOp op = MemoryOp.getMemoryOp(type);
+        if (op == null) throw argumentError(context, "undefined type " + typeName);
 
-        if(op != null) {
-            return op.get(context, getMemoryIO(), RubyNumeric.num2long(offset));
-        }
-
-        throw runtime.newArgumentError("undefined type " + typeName);
+        return op.get(context, getMemoryIO(), toLong(context, offset));
     }
 
     @JRubyMethod(name = "put")
     public final IRubyObject get(ThreadContext context, IRubyObject typeName, IRubyObject offset, IRubyObject value) {
-        Ruby runtime = context.runtime;
-
-        Type type = runtime.getFFI().getTypeResolver().findType(runtime, typeName);
+        Type type = context.runtime.getFFI().getTypeResolver().findType(context.runtime, typeName);
         MemoryOp op = MemoryOp.getMemoryOp(type);
-        if(op != null) {
-            op.put(context, getMemoryIO(), RubyNumeric.num2long(offset), value);
-
+        if (op != null) {
+            op.put(context, getMemoryIO(), toLong(context, offset), value);
             return context.nil;
         }
 
-        throw runtime.newArgumentError("undefined type " + typeName);
+        throw argumentError(context, "undefined type " + typeName);
     }
 
     abstract public AbstractMemory order(Ruby runtime, ByteOrder order);

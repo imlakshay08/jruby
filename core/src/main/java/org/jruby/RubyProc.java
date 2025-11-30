@@ -37,6 +37,8 @@ package org.jruby;
 
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
+
+import org.jruby.ast.util.ArgsUtil;
 import org.jruby.common.IRubyWarnings;
 import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.lexer.yacc.ISourcePosition;
@@ -47,18 +49,23 @@ import org.jruby.runtime.BlockBody;
 import org.jruby.runtime.ClassIndex;
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.IRBlockBody;
+import org.jruby.runtime.JavaSites;
 import org.jruby.runtime.MethodBlockBody;
-import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.Signature;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.runtime.marshal.DataType;
 
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.*;
+import static org.jruby.api.Define.defineClass;
+import static org.jruby.api.Error.argumentError;
+import static org.jruby.api.Warn.warn;
+import static org.jruby.runtime.ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR;
+import static org.jruby.runtime.ThreadContext.resetCallInfo;
 import static org.jruby.util.RubyStringBuilder.types;
 
-/**
- * @author  jpetersen
- */
 @JRubyClass(name="Proc")
 public class RubyProc extends RubyObject implements DataType {
     private Block block = Block.NULL_BLOCK;
@@ -73,7 +80,7 @@ public class RubyProc extends RubyObject implements DataType {
         this.type = type;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.0.0")
     protected RubyProc(Ruby runtime, RubyClass rubyClass, Block.Type type, ISourcePosition sourcePosition) {
         this(runtime, rubyClass, type, sourcePosition.getFile(), sourcePosition.getLine());
     }
@@ -91,15 +98,11 @@ public class RubyProc extends RubyObject implements DataType {
         this.block = block;
     }
 
-    public static RubyClass createProcClass(Ruby runtime) {
-        RubyClass procClass = runtime.defineClass("Proc", runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);
-
-        procClass.setClassIndex(ClassIndex.PROC);
-        procClass.setReifiedClass(RubyProc.class);
-
-        procClass.defineAnnotatedMethods(RubyProc.class);
-
-        return procClass;
+    public static RubyClass createProcClass(ThreadContext context, RubyClass Object) {
+        return defineClass(context, "Proc", Object, NOT_ALLOCATABLE_ALLOCATOR).
+                reifiedClass(RubyProc.class).
+                classIndex(ClassIndex.PROC).
+                defineMethods(context, RubyProc.class);
     }
 
     public Block getBlock() {
@@ -108,7 +111,7 @@ public class RubyProc extends RubyObject implements DataType {
 
     // Proc class
 
-    @Deprecated
+    @Deprecated(since = "1.6.0")
     public static RubyProc newProc(Ruby runtime, Block.Type type) {
         throw runtime.newRuntimeError("deprecated RubyProc.newProc with no block; do not use");
     }
@@ -119,22 +122,27 @@ public class RubyProc extends RubyObject implements DataType {
         if (type == Block.Type.NORMAL) type = Block.Type.PROC;
 
         RubyProc proc = new RubyProc(runtime, runtime.getProc(), type);
-        proc.setup(block);
+        proc.setup(runtime, block);
 
         return proc;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.0.0")
     public static RubyProc newProc(Ruby runtime, Block block, Block.Type type, ISourcePosition sourcePosition) {
         RubyProc proc = new RubyProc(runtime, runtime.getProc(), type, sourcePosition);
-        proc.setup(block);
+        proc.setup(runtime, block);
 
         return proc;
     }
 
     public static RubyProc newProc(Ruby runtime, Block block, Block.Type type, String file, int line) {
-        RubyProc proc = new RubyProc(runtime, runtime.getProc(), type, file, line);
-        proc.setup(block);
+        RubyClass clazz = runtime.getProc();
+        return newProc(runtime, clazz, block, type, file, line);
+    }
+
+    public static RubyProc newProc(Ruby runtime, RubyClass clazz, Block block, Block.Type type, String file, int line) {
+        RubyProc proc = new RubyProc(runtime, clazz, type, file, line);
+        proc.setup(runtime, block);
 
         return proc;
     }
@@ -147,7 +155,7 @@ public class RubyProc extends RubyObject implements DataType {
     @JRubyMethod(name = "new", rest = true, meta = true)
     public static IRubyObject newInstance(ThreadContext context, IRubyObject recv, IRubyObject[] args, Block block) {
         // No passed in block, lets check next outer frame for one ('Proc.new')
-        if (!block.isGiven()) throw context.runtime.newArgumentError("tried to create Proc object without a block");
+        if (!block.isGiven()) throw argumentError(context, "tried to create Proc object without a block");
 
         // This metaclass == recv check seems gross, but MRI seems to do the same:
         // if (!proc && ruby_block->block_obj && CLASS_OF(ruby_block->block_obj) == klass) {
@@ -156,16 +164,14 @@ public class RubyProc extends RubyObject implements DataType {
         }
 
         RubyProc obj = new RubyProc(context.runtime, (RubyClass)recv, Block.Type.PROC);
-        obj.setup(block);
+        obj.setup(context.runtime, block);
 
         obj.callMethod(context, "initialize", args, block);
         return obj;
     }
 
-    private void setup(Block procBlock) {
-        if (!procBlock.isGiven()) {
-            throw getRuntime().newArgumentError("tried to create Proc object without a block");
-        }
+    private void setup(Ruby runtime, Block procBlock) {
+        if (!procBlock.isGiven()) throw argumentError(runtime.getCurrentContext(), "tried to create Proc object without a block");
 
         if (isLambda()) {
             // TODO: warn "tried to create Proc object without a block"
@@ -211,38 +217,37 @@ public class RubyProc extends RubyObject implements DataType {
     }
 
     @JRubyMethod(name = "clone")
-    @Override
-    public IRubyObject rbClone() {
-        RubyProc proc = newProc(getRuntime(), block, type, file, line);
-        if (isFrozen()) proc.setFrozen(true);
-    	return proc;
+    public IRubyObject rbClone(ThreadContext context) {
+        return cloneSetup(context, procDup(), context.nil);
     }
 
     @JRubyMethod(name = "dup")
-    @Override
-    public IRubyObject dup() {
-        return newProc(getRuntime(), block, type, file, line);
+    public IRubyObject dup(ThreadContext context) {
+        return dupSetup(context, procDup());
+    }
+
+    private RubyProc procDup() {
+        return newProc(getRuntime(), getMetaClass(), block, type, file, line);
     }
 
     @Override
     @JRubyMethod(name = "to_s", alias = "inspect")
-    public IRubyObject to_s() {
-        Ruby runtime = getRuntime();
-        RubyString string = runtime.newString("#<");
+    public IRubyObject to_s(ThreadContext context) {
+        RubyString string = newString(context, "#<");
         string.setEncoding(RubyString.ASCII);
 
-        string.append(types(runtime, type()));
-        string.catString(":0x" + Integer.toString(System.identityHashCode(block), 16));
+        string.append(types(context.runtime, type()));
+        string.catStringUnsafe(":0x" + Integer.toString(System.identityHashCode(block), 16));
 
         boolean isSymbolProc = block.getBody() instanceof RubySymbol.SymbolProcBody;
         if (isSymbolProc) {
-            string.catString("(&:" + ((RubySymbol.SymbolProcBody) block.getBody()).getId() + ")");
+            string.catStringUnsafe("(&:" + ((RubySymbol.SymbolProcBody) block.getBody()).getId() + ")");
         } else if ((file = block.getBody().getFile()) != null) {
-            string.catString(" " + file + ":" + (block.getBody().getLine() + 1));
+            string.catStringUnsafe(" " + file + ":" + (block.getBody().getLine() + 1));
         }
 
-        if (isLambda()) string.catString(" (lambda)");
-        string.catString(">");
+        if (isLambda()) string.catStringUnsafe(" (lambda)");
+        string.catStringUnsafe(">");
 
         return string;
     }
@@ -252,7 +257,7 @@ public class RubyProc extends RubyObject implements DataType {
         checkFrozen();
 
         if (fromMethod) {
-            context.runtime.getWarnings().warn(IRubyWarnings.ID.MISCELLANEOUS, "Skipping set of ruby2_keywords flag for proc (proc created from method)");
+            warn(context, "Skipping set of ruby2_keywords flag for proc (proc created from method)");
             return this;
         }
 
@@ -262,11 +267,11 @@ public class RubyProc extends RubyObject implements DataType {
             if (signature.hasRest() && !signature.hasKwargs()) {
                 ((IRBlockBody) body).getScope().setRuby2Keywords();
             } else {
-                context.runtime.getWarnings().warn(IRubyWarnings.ID.MISCELLANEOUS, "Skipping set of ruby2_keywords flag for proc (proc accepts keywords or proc does not accept argument splat)");
+                warn(context, "Skipping set of ruby2_keywords flag for proc (proc accepts keywords or proc does not accept argument splat)");
             }
 
         } else {
-            context.runtime.getWarnings().warn(IRubyWarnings.ID.MISCELLANEOUS, "Skipping set of ruby2_keywords flag for proc (proc not defined in Ruby)");
+            warn(context, "Skipping set of ruby2_keywords flag for proc (proc not defined in Ruby)");
         }
         return this;
     }
@@ -286,7 +291,7 @@ public class RubyProc extends RubyObject implements DataType {
 
         if (type != other.type) return context.fals;
 
-        return context.runtime.newBoolean(getBlock().equals(other.block));
+        return asBoolean(context, getBlock().equals(other.block));
     }
 
     /**
@@ -295,7 +300,7 @@ public class RubyProc extends RubyObject implements DataType {
      *
      * Note: nothing should be calling this any more.
      */
-    @Deprecated
+    @Deprecated(since = "9.3.0.0")
     public static IRubyObject[] prepareArgs(ThreadContext context, Block.Type type, BlockBody blockBody, IRubyObject[] args) {
         if (type == Block.Type.LAMBDA) return args;
 
@@ -306,7 +311,7 @@ public class RubyProc extends RubyObject implements DataType {
 
     private static IRubyObject[] checkArityForLambda(ThreadContext context, Block.Type type, BlockBody blockBody, IRubyObject... args) {
         if (type == Block.Type.LAMBDA) {
-            blockBody.getSignature().checkArity(context.runtime, args);
+            blockBody.getSignature().checkArity(context, args);
         }
 
         return args;
@@ -375,14 +380,20 @@ public class RubyProc extends RubyObject implements DataType {
         return newBlock.call(context, args, passedBlock);
     }
 
-    @JRubyMethod(name = "arity")
+    @Deprecated(since = "10.0.0.0")
     public RubyFixnum arity() {
+        return arity(getCurrentContext());
+    }
+
+    @JRubyMethod(name = "arity")
+    public RubyFixnum arity(ThreadContext context) {
         Signature signature = block.getSignature();
 
-        if (block.type == Block.Type.LAMBDA) return getRuntime().newFixnum(signature.arityValue());
+        int min = signature.min();
+        int max = signature.max();
+        boolean test = isLambda() ? min == max : max != -1; // specific value or unlimited
 
-        // FIXME: Consider min/max like MRI here instead of required + kwarg count.
-        return getRuntime().newFixnum(signature.hasRest() ? signature.arityValue() : signature.required() + signature.getRequiredKeywordForArityCount());
+        return asFixnum(context, test ? min : -min-1);
     }
 
     @JRubyMethod(name = "to_proc")
@@ -392,19 +403,16 @@ public class RubyProc extends RubyObject implements DataType {
 
     @JRubyMethod
     public IRubyObject source_location(ThreadContext context) {
-        Ruby runtime = context.runtime;
-        if (file != null) {
-            return runtime.newArray(runtime.newString(file), runtime.newFixnum(line + 1 /*zero-based*/));
-        }
+        if (file != null) return newArray(context, newString(context, file), asFixnum(context, line + 1 /*zero-based*/));
 
         if (block != null) {
             Binding binding = block.getBinding();
 
             // block+binding may exist for a core method, which will have a null filename
             if (binding.getFile() != null) {
-                return runtime.newArray(
-                        runtime.newString(binding.getFile()),
-                        runtime.newFixnum(binding.getLine() + 1 /*zero-based*/));
+                return newArray(context,
+                        newString(context, binding.getFile()),
+                        asFixnum(context, binding.getLine() + 1 /*zero-based*/));
             }
         }
 
@@ -413,15 +421,35 @@ public class RubyProc extends RubyObject implements DataType {
 
     @JRubyMethod
     public IRubyObject parameters(ThreadContext context) {
+        return parametersCommon(context, isLambda());
+    }
+
+    @JRubyMethod(keywords = true)
+    public IRubyObject parameters(ThreadContext context, IRubyObject opts) {
+        int callInfo = resetCallInfo(context);
+        boolean isLambda = isLambda();
+
+        IRubyObject lambdaOpt = ArgsUtil.extractKeywordArg(context, (RubyHash) opts, "lambda");
+
+        // ignore option if nil
+        if (!lambdaOpt.isNil()) {
+            isLambda = (callInfo & ThreadContext.CALL_KEYWORD) != 0 ?
+                    lambdaOpt.isTrue() :
+                    isLambda();
+        }
+
+        return parametersCommon(context, isLambda);
+    }
+
+    private IRubyObject parametersCommon(ThreadContext context, boolean isLambda) {
         BlockBody body = this.getBlock().getBody();
 
-        return Helpers.argumentDescriptorsToParameters(context.runtime,
-                body.getArgumentDescriptors(), isLambda());
+        return Helpers.argumentDescriptorsToParameters(context, body.getArgumentDescriptors(), isLambda);
     }
 
     @JRubyMethod(name = "lambda?")
     public IRubyObject lambda_p(ThreadContext context) {
-        return RubyBoolean.newBoolean(context, isLambda());
+        return asBoolean(context, isLambda());
     }
 
     private boolean isLambda() {
@@ -440,19 +468,23 @@ public class RubyProc extends RubyObject implements DataType {
         return type.equals(Block.Type.THREAD);
     }
 
-    @Deprecated
-    public final IRubyObject call19(ThreadContext context, IRubyObject[] args, Block block) {
-        return call(context, args, block);
+    private static JavaSites.ProcSites sites(ThreadContext context) {
+        return context.sites.Proc;
     }
 
-    @Deprecated
-    public IRubyObject to_s19() {
-        return to_s();
-    }
-
-    @Deprecated
+    @Deprecated(since = "9.2.10.0")
     public final IRubyObject call(ThreadContext context, IRubyObject[] args, IRubyObject self, Block passedBlock) {
         return block.call(context, args, passedBlock);
+    }
+
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject rbClone() {
+        return rbClone(getRuntime().getCurrentContext());
+    }
+
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject dup() {
+        return dup(getRuntime().getCurrentContext());
     }
 
     public void setFromMethod() {

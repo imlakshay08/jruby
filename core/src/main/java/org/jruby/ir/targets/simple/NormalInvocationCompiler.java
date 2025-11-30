@@ -12,6 +12,7 @@ import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.ir.targets.IRBytecodeAdapter;
 import org.jruby.ir.targets.InvocationCompiler;
 import org.jruby.ir.targets.JVM;
+import org.jruby.ir.targets.indy.IndyInvocationCompiler;
 import org.jruby.runtime.Block;
 import org.jruby.runtime.CallSite;
 import org.jruby.runtime.CallType;
@@ -69,7 +70,7 @@ public class NormalInvocationCompiler implements InvocationCompiler {
     public void invoke(String file, int lineNumber, String scopeFieldName, CallBase call, int arity) {
         String id = call.getId();
         if (arity > IRBytecodeAdapter.MAX_ARGUMENTS)
-            throw new NotCompilableException("call to `" + id + "' has more than " + IRBytecodeAdapter.MAX_ARGUMENTS + " arguments");
+            throw new NotCompilableException("call to '" + id + "' has more than " + IRBytecodeAdapter.MAX_ARGUMENTS + " arguments");
 
         MethodType incoming, outgoing;
         String incomingSig, outgoingSig;
@@ -354,7 +355,7 @@ public class NormalInvocationCompiler implements InvocationCompiler {
 
     public void invokeSelf(String file, String scopeFieldName, CallBase call, int arity) {
         if (arity > IRBytecodeAdapter.MAX_ARGUMENTS)
-            throw new NotCompilableException("call to `" + call.getId() + "' has more than " + IRBytecodeAdapter.MAX_ARGUMENTS + " arguments");
+            throw new NotCompilableException("call to '" + call.getId() + "' has more than " + IRBytecodeAdapter.MAX_ARGUMENTS + " arguments");
 
         invoke(file, compiler.getLastLine(), scopeFieldName, call, arity);
     }
@@ -490,5 +491,17 @@ public class NormalInvocationCompiler implements InvocationCompiler {
             compiler.adapter.ldc(flags);
             compiler.invokeIRHelper("setCallInfo", sig(void.class, ThreadContext.class, int.class));
         }
+    }
+
+    @Override
+    public void invokeBlockGiven(String methodName, String file) {
+        // direct block_given? and iterator? calls always use indy
+        IndyInvocationCompiler.invokeBlockGiven(compiler, methodName, file);
+    }
+
+    @Override
+    public void invokeFrameName(String methodName, String file) {
+        // direct __method__ and __callee__ calls always use indy
+        IndyInvocationCompiler.invokeFrameName(compiler, methodName, file);
     }
 }

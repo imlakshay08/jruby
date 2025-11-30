@@ -47,7 +47,7 @@ public abstract class ResourceException extends IOException {
 
         @Override
         public RaiseException newRaiseException(Ruby runtime) {
-            return runtime.newRaiseException(runtime.getErrno().getClass(errnoClass), path);
+            return runtime.newRaiseException(runtime.getErrno().getClass(runtime.getCurrentContext(), errnoClass), path);
         }
 
         public String getPath() {
@@ -87,7 +87,7 @@ public abstract class ResourceException extends IOException {
         public TooManySymlinks(String path) { super("ELOOP", path); }
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.1.0")
     public static class IOError extends ResourceException {
         private final IOException ioe;
 

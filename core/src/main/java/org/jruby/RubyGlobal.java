@@ -40,12 +40,12 @@ package org.jruby;
 
 import jnr.enxio.channels.NativeDeviceChannel;
 import jnr.posix.POSIX;
-
 import org.jcodings.Encoding;
 import org.jcodings.specific.USASCIIEncoding;
 import org.jruby.anno.JRubyMethod;
+import org.jruby.api.Create;
 import org.jruby.ast.util.ArgsUtil;
-import org.jruby.common.IRubyWarnings.ID;
+import org.jruby.common.IRubyWarnings;
 import org.jruby.exceptions.RaiseException;
 import org.jruby.internal.runtime.GlobalVariables;
 import org.jruby.internal.runtime.ValueAccessor;
@@ -59,7 +59,6 @@ import org.jruby.runtime.IAccessor;
 import org.jruby.runtime.ReadonlyGlobalVariable;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
-import org.jruby.runtime.encoding.EncodingService;
 import org.jruby.util.ByteList;
 import org.jruby.util.ByteListHelper;
 import org.jruby.util.KCode;
@@ -72,10 +71,6 @@ import org.jruby.util.io.FilenoUtil;
 import org.jruby.util.io.OpenFile;
 import org.jruby.util.io.STDIO;
 
-import static org.jruby.internal.runtime.GlobalVariable.Scope.*;
-import static org.jruby.util.RubyStringBuilder.str;
-import static org.jruby.util.io.EncodingUtils.newExternalStringWithEncoding;
-
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -84,6 +79,7 @@ import java.io.OutputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.channels.Channel;
 import java.nio.channels.Channels;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -91,111 +87,142 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static org.jruby.api.Access.argsFile;
+import static org.jruby.api.Access.encodingService;
+import static org.jruby.api.Access.enumerableModule;
+import static org.jruby.api.Access.exceptionClass;
+import static org.jruby.api.Access.globalVariables;
+import static org.jruby.api.Access.instanceConfig;
+import static org.jruby.api.Access.objectClass;
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.toInt;
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newFrozenString;
+import static org.jruby.api.Create.newSharedString;
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Error.argumentError;
+import static org.jruby.api.Error.nameError;
+import static org.jruby.api.Error.runtimeError;
+import static org.jruby.api.Error.typeError;
+import static org.jruby.api.Warn.warn;
+import static org.jruby.api.Warn.warnDeprecated;
+import static org.jruby.internal.runtime.GlobalVariable.Scope.FRAME;
+import static org.jruby.internal.runtime.GlobalVariable.Scope.GLOBAL;
+import static org.jruby.internal.runtime.GlobalVariable.Scope.THREAD;
+import static org.jruby.util.RubyStringBuilder.str;
+import static org.jruby.util.io.EncodingUtils.newExternalStringWithEncoding;
+
 /** This class initializes global variables and constants.
  *
  * @author jpetersen
  */
 public class RubyGlobal {
     public static void initARGV(Ruby runtime) {
+        var context = runtime.getCurrentContext();
+        var objectClass = objectClass(context);
         // define ARGV and $* for this runtime
-        RubyArray argvArray = runtime.newArray();
-        String[] argv = runtime.getInstanceConfig().getArgv();
+        String[] argv = instanceConfig(context).getArgv();
+        var argvArray = Create.allocArray(context, argv.length);
 
         for (String arg : argv) {
-            argvArray.append(RubyString.newInternalFromJavaExternal(runtime, arg));
+            argvArray.append(context, RubyString.newInternalFromJavaExternal(runtime, arg));
         }
 
-        if (runtime.getObject().getConstantNoConstMissing("ARGV") != null) {
-            ((RubyArray)runtime.getObject().getConstant("ARGV")).replace(argvArray);
+        if (objectClass.getConstantNoConstMissing(context, "ARGV") != null) {
+            ((RubyArray<?>) objectClass.getConstant(context, "ARGV")).replace(context, argvArray);
         } else {
-            runtime.getObject().setConstantQuiet("ARGV", argvArray);
-            runtime.getGlobalVariables().define("$*", new ValueAccessor(argvArray), GLOBAL);
+            objectClass.setConstantQuiet(context, "ARGV", argvArray);
+            globalVariables(context).define("$*", new ValueAccessor(argvArray), GLOBAL);
         }
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static void createGlobals(Ruby runtime) {
-        GlobalVariables globals = runtime.getGlobalVariables();
+        var context = runtime.getCurrentContext();
+        createGlobalsAndENV(context, globalVariables(context), instanceConfig(context));
+    }
 
-        runtime.setTopLevelBinding(runtime.newBinding());
-        runtime.defineGlobalConstant("TOPLEVEL_BINDING", runtime.getTopLevelBinding());
+    public static RubyHash createGlobalsAndENV(ThreadContext context, GlobalVariables globals, RubyInstanceConfig instanceConfig) {
+        var runtime = context.runtime;
+        var Object = objectClass(context);
+        var topLevelBinding = runtime.newBinding();
+        runtime.setTopLevelBinding(topLevelBinding);
+        Object.defineConstant(context, "TOPLEVEL_BINDING", topLevelBinding);
 
         initARGV(runtime);
 
-        IAccessor d = new ValueAccessor(runtime.newString(
-                runtime.getInstanceConfig().displayedFileName()));
-        globals.define("$PROGRAM_NAME", d, GLOBAL);
-        globals.define("$0", d, GLOBAL);
+        // initially set to config's script name, if any
+        defineArgv0Global(context, globals, instanceConfig.displayedFileName());
 
         // Version information:
-        IRubyObject version;
-        IRubyObject patchlevel;
         IRubyObject release = RubyString.newFString(runtime, Constants.COMPILE_DATE);
         IRubyObject platform = RubyString.newFString(runtime, Constants.PLATFORM);
         IRubyObject engine = RubyString.newFString(runtime, Constants.ENGINE);
+        IRubyObject version = RubyString.newFString(runtime, Constants.RUBY_VERSION);
+        IRubyObject patchlevel = asFixnum(context, 0);
 
-        version = RubyString.newFString(runtime, Constants.RUBY_VERSION);
-        patchlevel = runtime.newFixnum(0);
-        runtime.defineGlobalConstant("RUBY_VERSION", version);
-        runtime.defineGlobalConstant("RUBY_PATCHLEVEL", patchlevel);
-        runtime.defineGlobalConstant("RUBY_RELEASE_DATE", release);
-        runtime.defineGlobalConstant("RUBY_PLATFORM", platform);
+        Object.defineConstant(context, "RUBY_VERSION", version);
+        Object.defineConstant(context, "RUBY_PATCHLEVEL", patchlevel);
+        Object.defineConstant(context, "RUBY_RELEASE_DATE", release);
+        Object.defineConstant(context, "RUBY_PLATFORM", platform);
 
         IRubyObject description = RubyString.newFString(runtime, OutputStrings.getVersionString());
-        runtime.defineGlobalConstant("RUBY_DESCRIPTION", description);
+        Object.defineConstant(context, "RUBY_DESCRIPTION", description);
 
         IRubyObject copyright = RubyString.newFString(runtime, OutputStrings.getCopyrightString());
-        runtime.defineGlobalConstant("RUBY_COPYRIGHT", copyright);
+        Object.defineConstant(context, "RUBY_COPYRIGHT", copyright);
 
-        runtime.defineGlobalConstant("RELEASE_DATE", release);
-        runtime.defineGlobalConstant("PLATFORM", platform);
+        Object.defineConstant(context, "RELEASE_DATE", release);
+        Object.defineConstant(context, "PLATFORM", platform);
 
         IRubyObject jrubyVersion = RubyString.newFString(runtime, Constants.VERSION);
         IRubyObject jrubyRevision = RubyString.newFString(runtime, Constants.REVISION);
-        runtime.defineGlobalConstant("JRUBY_VERSION", jrubyVersion);
-        runtime.defineGlobalConstant("JRUBY_REVISION", jrubyRevision);
-        runtime.defineGlobalConstant("RUBY_REVISION", RubyString.newFString(runtime, Constants.REVISION));
-        runtime.defineGlobalConstant("RUBY_ENGINE", engine);
-        runtime.defineGlobalConstant("RUBY_ENGINE_VERSION", jrubyVersion);
+        Object.defineConstant(context, "JRUBY_VERSION", jrubyVersion);
+        Object.defineConstant(context, "JRUBY_REVISION", jrubyRevision);
+        Object.defineConstant(context, "RUBY_REVISION", RubyString.newFString(runtime, Constants.REVISION));
+        Object.defineConstant(context, "RUBY_ENGINE", engine);
+        Object.defineConstant(context, "RUBY_ENGINE_VERSION", jrubyVersion);
 
-        RubyInstanceConfig.Verbosity verbosity = runtime.getInstanceConfig().getVerbosity();
-        runtime.defineVariable(new WarningGlobalVariable(runtime, "$-W", verbosity), GLOBAL);
+        RubyInstanceConfig.Verbosity verbosity = instanceConfig.getVerbosity();
+        runtime.defineVariable(new WarningGlobalVariable(context, "$-W", verbosity), GLOBAL);
 
-        IRubyObject defaultRS = RubyString.newFString(runtime, runtime.getInstanceConfig().getRecordSeparator());
+        IRubyObject defaultRS = RubyString.newFString(runtime, instanceConfig.getRecordSeparator());
         GlobalVariable rs = new StringGlobalVariable(runtime, "$/", defaultRS);
         runtime.defineVariable(rs, GLOBAL);
         runtime.setRecordSeparatorVar(rs);
         globals.setDefaultSeparator(defaultRS);
-        runtime.defineVariable(new StringGlobalVariable(runtime, "$\\", runtime.getNil()), GLOBAL);
-        runtime.defineVariable(new DeprecatedStringGlobalVariable(runtime, "$,", runtime.getNil()), GLOBAL);
+        runtime.defineVariable(new StringGlobalVariable(runtime, "$\\", context.nil), GLOBAL);
+        runtime.defineVariable(new DeprecatedStringGlobalVariable(runtime, "$,", context.nil), GLOBAL);
 
         runtime.defineVariable(new LineNumberGlobalVariable(runtime, "$."), GLOBAL);
         runtime.defineVariable(new LastlineGlobalVariable(runtime, "$_"), FRAME);
         runtime.defineVariable(new LastExitStatusVariable(runtime, "$?"), THREAD);
 
-        runtime.defineVariable(new ErrorInfoGlobalVariable(runtime, "$!", runtime.getNil()), THREAD);
-        runtime.defineVariable(new NonEffectiveGlobalVariable(runtime, "$=", runtime.getFalse()), GLOBAL);
+        runtime.defineVariable(new ErrorInfoGlobalVariable(runtime, "$!", context.nil), THREAD);
+        runtime.defineVariable(new NonEffectiveGlobalVariable(runtime, "$=", context.fals), GLOBAL);
 
-        if(runtime.getInstanceConfig().getInputFieldSeparator() == null) {
-            runtime.defineVariable(new DeprecatedStringOrRegexpGlobalVariable(runtime, "$;", runtime.getNil()), GLOBAL);
+        if(instanceConfig.getInputFieldSeparator() == null) {
+            runtime.defineVariable(new DeprecatedStringOrRegexpGlobalVariable(runtime, "$;", context.nil), GLOBAL);
         } else {
-            runtime.defineVariable(new DeprecatedStringOrRegexpGlobalVariable(runtime, "$;", RubyRegexp.newRegexp(runtime, runtime.getInstanceConfig().getInputFieldSeparator(), new RegexpOptions())), GLOBAL);
+            runtime.defineVariable(new DeprecatedStringOrRegexpGlobalVariable(runtime, "$;", RubyRegexp.newRegexp(runtime, instanceConfig.getInputFieldSeparator(), new RegexpOptions())), GLOBAL);
         }
 
-        RubyInstanceConfig.Verbosity verbose = runtime.getInstanceConfig().getVerbosity();
+        RubyInstanceConfig.Verbosity verbose = instanceConfig.getVerbosity();
         IRubyObject verboseValue;
         if (verbose == RubyInstanceConfig.Verbosity.NIL) {
-            verboseValue = runtime.getNil();
+            verboseValue = context.nil;
         } else if(verbose == RubyInstanceConfig.Verbosity.TRUE) {
-            verboseValue = runtime.getTrue();
+            verboseValue = context.tru;
         } else {
-            verboseValue = runtime.getFalse();
+            verboseValue = context.fals;
         }
         runtime.setVerbose(verboseValue);
         runtime.defineVariable(new VerboseGlobalVariable(runtime, "$VERBOSE"), GLOBAL);
         runtime.defineVariable(new VerboseGlobalVariable(runtime, "$-v"), GLOBAL);
         runtime.defineVariable(new VerboseGlobalVariable(runtime, "$-w"), GLOBAL);
 
-        runtime.setDebug(runtime.newBoolean(runtime.getInstanceConfig().isDebug()));
+        runtime.setDebug(runtime.newBoolean(instanceConfig.isDebug()));
         runtime.defineVariable(new DebugGlobalVariable(runtime, "$DEBUG"), GLOBAL);
         runtime.defineVariable(new DebugGlobalVariable(runtime, "$-d"), GLOBAL);
 
@@ -222,32 +249,23 @@ public class RubyGlobal {
         globals.defineReadonly("$$", new PidAccessor(runtime), GLOBAL);
 
         // after defn of $stderr as the call may produce warnings
-        defineGlobalEnvConstants(runtime);
+        RubyHash env = defineGlobalEnvConstants(context);
 
         // Fixme: Do we need the check or does Main.java not call this...they should consolidate
         if (globals.get("$*").isNil()) {
-            globals.defineReadonly("$*", new ValueAccessor(runtime.newArray()), GLOBAL);
+            globals.defineReadonly("$*", new ValueAccessor(newArray(context)), GLOBAL);
         }
 
-        globals.defineReadonly("$-p",
-                new ValueAccessor(runtime.newBoolean(runtime.getInstanceConfig().isAssumePrinting())),
-                GLOBAL);
-                globals.defineReadonly("$-a",
-                new ValueAccessor(runtime.newBoolean(runtime.getInstanceConfig().isSplit())),
-                GLOBAL);
-        globals.defineReadonly("$-l",
-                new ValueAccessor(runtime.newBoolean(runtime.getInstanceConfig().isProcessLineEnds())),
-                GLOBAL);
+        globals.defineReadonly("$-p", new ValueAccessor(asBoolean(context, instanceConfig.isAssumePrinting())), GLOBAL);
+        globals.defineReadonly("$-a", new ValueAccessor(asBoolean(context, instanceConfig.isSplit())), GLOBAL);
+        globals.defineReadonly("$-l", new ValueAccessor(asBoolean(context, instanceConfig.isProcessLineEnds())), GLOBAL);
 
         // ARGF, $< object
-        RubyArgsFile.initArgsFile(runtime);
+        RubyArgsFile.initArgsFile(context, enumerableModule(context), globals);
 
-        String inplace = runtime.config.getInPlaceBackupExtension();
-        if (inplace != null) {
-            runtime.defineVariable(new ArgfGlobalVariable(runtime, "$-i", runtime.newString(inplace)), GLOBAL);
-        } else {
-            runtime.defineVariable(new ArgfGlobalVariable(runtime, "$-i", runtime.getNil()), GLOBAL);
-        }
+        String inplace = instanceConfig.getInPlaceBackupExtension();
+        runtime.defineVariable(new ArgfGlobalVariable(runtime, "$-i",
+                inplace != null ? newString(context, inplace) : context.nil), GLOBAL);
 
         globals.alias("$-0", "$/");
 
@@ -277,9 +295,36 @@ public class RubyGlobal {
         globals.alias("$PREMATCH", "$`");
         globals.alias("$POSTMATCH", "$'");
         globals.alias("$LAST_PAREN_MATCH", "$+");
+
+        return env;
+    }
+
+    static void defineArgv0Global(ThreadContext context, GlobalVariables globals, String scriptName) {
+        IAccessor d = new IAccessor() {
+            RubyString value = newFrozenString(context, scriptName);
+
+            @Override
+            public IRubyObject getValue() {
+                return value;
+            }
+
+            @Override
+            public IRubyObject setValue(IRubyObject newValue) {
+                RubyString stringValue = newValue.convertToString();
+                if (!stringValue.isFrozen()) {
+                    stringValue = stringValue.newFrozen();
+                }
+                value = stringValue;
+                return stringValue;
+            }
+        };
+        globals.define("$PROGRAM_NAME", d, GLOBAL);
+        globals.define("$0", d, GLOBAL);
     }
 
     public static void initSTDIO(Ruby runtime, GlobalVariables globals) {
+        var context = runtime.getCurrentContext();
+        var Object = objectClass(context);
         RubyIO stdin, stdout, stderr;
 
         // If we're the main for the process and native stdio is enabled, use default descriptors
@@ -302,19 +347,22 @@ public class RubyGlobal {
                     runtime, runtime.getErr(), prepareStdioChannel(runtime, STDIO.ERR, runtime.getErr()), OpenFile.WRITABLE | OpenFile.SYNC, runtime.getIO(), "<STDERR>");
         }
 
-        if (runtime.getObject().getConstantFromNoConstMissing("STDIN") == null) {
+        var object = runtime.getObject();
+        if (object.getConstantFromNoConstMissing(context, "STDIN") == null) {
             runtime.defineVariable(new InputGlobalVariable(runtime, "$stdin", stdin), GLOBAL);
             runtime.defineVariable(new OutputGlobalVariable(runtime, "$stdout", stdout), GLOBAL);
             globals.alias("$>", "$stdout");
             runtime.defineVariable(new OutputGlobalVariable(runtime, "$stderr", stderr), GLOBAL);
 
-            runtime.defineGlobalConstant("STDIN", stdin);
-            runtime.defineGlobalConstant("STDOUT", stdout);
-            runtime.defineGlobalConstant("STDERR", stderr);
+            Object.defineConstant(context, "STDIN", stdin);
+            Object.defineConstant(context, "STDOUT", stdout);
+            Object.defineConstant(context, "STDERR", stderr);
+
+            runtime.setOriginalStderr(stderr);
         } else {
-            ((RubyIO) runtime.getObject().getConstant("STDIN")).getOpenFile().setFD(stdin.getOpenFile().fd());
-            ((RubyIO) runtime.getObject().getConstant("STDOUT")).getOpenFile().setFD(stdout.getOpenFile().fd());
-            ((RubyIO) runtime.getObject().getConstant("STDERR")).getOpenFile().setFD(stderr.getOpenFile().fd());
+            ((RubyIO) object.getConstant(context, "STDIN")).getOpenFile().setFD(stdin.getOpenFile().fd());
+            ((RubyIO) object.getConstant(context, "STDOUT")).getOpenFile().setFD(stdout.getOpenFile().fd());
+            ((RubyIO) object.getConstant(context, "STDERR")).getOpenFile().setFD(stderr.getOpenFile().fd());
         }
     }
 
@@ -382,27 +430,29 @@ public class RubyGlobal {
 
 
     @SuppressWarnings("unchecked")
-    private static void defineGlobalEnvConstants(Ruby runtime) {
+    private static RubyHash defineGlobalEnvConstants(ThreadContext context) {
+        var runtime = context.runtime;
+        var Object = objectClass(context);
     	Map<RubyString, RubyString> environmentVariableMap = OSEnvironment.environmentVariableMap(runtime);
+        var instanceConfig = instanceConfig(context);
     	RubyHash env = new CaseInsensitiveStringOnlyRubyHash(
-            runtime, environmentVariableMap, runtime.getNil(),
-            runtime.getInstanceConfig().isNativeEnabled() && runtime.getInstanceConfig().isUpdateNativeENVEnabled()
+            runtime, environmentVariableMap, context.nil,
+            instanceConfig.isNativeEnabled() && instanceConfig.isUpdateNativeENVEnabled()
         );
-        env.getSingletonClass().defineAnnotatedMethods(CaseInsensitiveStringOnlyRubyHash.class);
-        runtime.defineGlobalConstant("ENV", env);
-        runtime.setENV(env);
+        env.singletonClass(context).defineMethods(context, CaseInsensitiveStringOnlyRubyHash.class);
+        Object.defineConstant(context, "ENV", env);
 
         // Define System.getProperties() in ENV_JAVA
         Map<RubyString, RubyString> systemPropertiesMap = OSEnvironment.systemPropertiesMap(runtime);
-        RubyHash envJava = new ReadOnlySystemPropertiesHash(
-                runtime, systemPropertiesMap, runtime.getNil()
-        );
+        RubyHash envJava = new ReadOnlySystemPropertiesHash(runtime, systemPropertiesMap, context.nil);
         envJava.setFrozen(true);
-        runtime.defineGlobalConstant("ENV_JAVA", envJava);
+        Object.defineConstant(context, "ENV_JAVA", envJava);
+
+        return env;
     }
 
-    private static void warnDeprecatedGlobal(final Ruby runtime, final String name) {
-        runtime.getWarnings().warnDeprecated(ID.MISCELLANEOUS, "`" + name + "' is deprecated");
+    private static void warnDeprecatedGlobal(ThreadContext context, final String name) {
+        warnDeprecated(context, "'" + name + "' is deprecated");
     }
 
     /**
@@ -411,6 +461,8 @@ public class RubyGlobal {
      *
      */
     public static class CaseInsensitiveStringOnlyRubyHash extends StringOnlyRubyHash {
+
+        private static final byte[] HASHROCKET_WITH_SPACES = " => ".getBytes(StandardCharsets.UTF_8);
 
         public CaseInsensitiveStringOnlyRubyHash(Ruby runtime, Map<RubyString, RubyString> valueMap, IRubyObject defaultValue, boolean updateRealENV) {
             super(runtime, valueMap, defaultValue, updateRealENV);
@@ -423,7 +475,7 @@ public class RubyGlobal {
             IRubyObject key = arg.convertToString();
             IRubyObject value = internalGet(key);
 
-            EnvStringValidation.ensureValidEnvString(context.runtime, key, "key");
+            EnvStringValidation.ensureValidEnvString(context, key, "key");
 
             if (value == null) return context.nil;
 
@@ -439,39 +491,39 @@ public class RubyGlobal {
         @JRubyMethod
         public IRubyObject freeze(ThreadContext context) {
             // FIXME: So far I can see this is only used by ENV so I put it here but perhaps we need to differentiate case
-            throw context.runtime.newTypeError("cannot freeze ENV");
+            throw typeError(context, "cannot freeze ENV");
         }
 
         @JRubyMethod(name = "assoc")
         public IRubyObject assoc(final ThreadContext context, IRubyObject obj) {
             RubyString expected = verifyStringLike(context, obj).convertToString();
-            EnvStringValidation.ensureValidEnvString(context.getRuntime(), obj, "value");
+            EnvStringValidation.ensureValidEnvString(context, obj, "value");
 
             return super.assoc(context, expected);
         }
 
         @JRubyMethod(name = "fetch", required = 1, optional = 2)
         public IRubyObject fetch(ThreadContext context, IRubyObject[] args, Block block) {
-            EnvStringValidation.ensureValidEnvString(context.runtime, args[0], "key");
-            
-            switch(args.length) {
-                case 1: return super.fetch(context, args[0], block);
-                case 2: return super.fetch(context, args[0], args[1], block);
-            }
+            EnvStringValidation.ensureValidEnvString(context, args[0], "key");
 
-            return null;
+            return switch (args.length) {
+                case 1 -> super.fetch(context, args[0], block);
+                case 2 -> super.fetch(context, args[0], args[1], block);
+                default -> null;
+            };
+
         }
 
         @JRubyMethod(name = "fetch", required = 1)
         public IRubyObject fetch(ThreadContext context, IRubyObject key, Block block) {
-            EnvStringValidation.ensureValidEnvString(context.getRuntime(), key, "key");
+            EnvStringValidation.ensureValidEnvString(context, key, "key");
 
             return super.fetch(context, verifyStringLike(context, key.convertToString()), block);
         }
 
         @JRubyMethod
         public IRubyObject delete(ThreadContext context, IRubyObject key, Block block) {
-            EnvStringValidation.ensureValidEnvString(context.getRuntime(), key, "key");
+            EnvStringValidation.ensureValidEnvString(context, key, "key");
 
             return super.delete(context, verifyStringLike(context, key), block);
         }
@@ -489,11 +541,11 @@ public class RubyGlobal {
             return this;
         }
 
-        private static final VisitorWithState<RubyArray> EachVisitor = new VisitorWithState<RubyArray>() {
+        private static final VisitorWithState<RubyArray<?>> EachVisitor = new VisitorWithState<>() {
             @Override
-            public void visit(ThreadContext context, RubyHash self, IRubyObject key, IRubyObject value, int index, RubyArray ary) {
-                ary.append(newString(context, key));
-                ary.append(newName(context, key, value));
+            public void visit(ThreadContext context, RubyHash self, IRubyObject key, IRubyObject value, int index, RubyArray<?> ary) {
+                ary.append(context, newString(context, key));
+                ary.append(context, newName(context, key, value));
             }
         };
 
@@ -508,7 +560,7 @@ public class RubyGlobal {
         public RubyBoolean has_key_p(ThreadContext context, IRubyObject key) {
             IRubyObject expected = verifyStringLike(context, key);
             
-            EnvStringValidation.ensureValidEnvString(context.runtime, key, "key");
+            EnvStringValidation.ensureValidEnvString(context, key, "key");
 
             return internalGetEntry(expected) == NO_ENTRY ? context.fals : context.tru;
         }
@@ -517,14 +569,14 @@ public class RubyGlobal {
         public IRubyObject has_value_pp(ThreadContext context, IRubyObject expected) {
             if (!isStringLike(expected)) return context.nil;
 
-            EnvStringValidation.ensureValidEnvString(context.runtime, expected, "value");
+            EnvStringValidation.ensureValidEnvString(context, expected, "value");
             
             return super.has_value_p(context, expected.convertToString());
         }
 
-        @JRubyMethod(name = "index")
+        @Deprecated(since = "10.0.0.0")
         public IRubyObject index(ThreadContext context, IRubyObject expected) {
-            context.runtime.getWarnings().warn(ID.DEPRECATED_METHOD, "ENV#index is deprecated; use ENV#key");
+            warn(context, "ENV#index is deprecated; use ENV#key");
 
             return key(context, expected);
         }
@@ -545,7 +597,7 @@ public class RubyGlobal {
         private static final VisitorWithState<RubyArray> StoreKeyVisitor = new VisitorWithState<RubyArray>() {
             @Override
             public void visit(ThreadContext context, RubyHash self, IRubyObject key, IRubyObject value, int index, RubyArray keys) {
-                keys.storeInternal(index, newString(context, key));
+                keys.storeInternal(context, index, newString(context, key));
             }
         };
 
@@ -611,19 +663,15 @@ public class RubyGlobal {
             return pair;
         }
 
+        @Override
         @JRubyMethod(name = "to_s")
         public RubyString to_s(ThreadContext context) {
-            return RubyString.newStringShared(context.runtime, ENV);
+            return newSharedString(context, ENV);
         }
 
-        @Override
-        public IRubyObject to_s() {
-            return RubyString.newStringShared(getRuntime(), ENV);
-        }
-
-        @Deprecated
+        @Deprecated(since = "9.3.0.0")
         public RubyHash to_h() {
-            return to_h(getRuntime().getCurrentContext(), Block.NULL_BLOCK);
+            return to_h(getCurrentContext(), Block.NULL_BLOCK);
         }
 
         @JRubyMethod
@@ -635,24 +683,16 @@ public class RubyGlobal {
         @JRubyMethod(name = "clone")
         @Override
         public IRubyObject rbClone(ThreadContext context) {
-            context.runtime.getWarnings().warnDeprecatedAlternate("ENV.clone", "ENV.to_h");
-
-            return this;
+            throw typeError(context, "Cannot clone ENV, use ENV.to_h to get a copy of ENV as a hash");
         }
 
         @JRubyMethod(name = "clone")
         public IRubyObject rbClone(ThreadContext context, IRubyObject _opts) {
-            Ruby runtime = context.runtime;
-
-            IRubyObject opts = ArgsUtil.getOptionsArg(runtime, _opts, true);
-            if (opts.isNil()) {
-                throw runtime.newArgumentError(1, 0);
-            }
+            IRubyObject opts = ArgsUtil.getOptionsArg(context.runtime, _opts, true);
+            if (opts.isNil()) throw argumentError(context, 1, 0);
 
             IRubyObject freeze = ArgsUtil.getFreezeOpt(context, opts);
-            if (freeze != null && freeze.isTrue()) {
-                throw runtime.newTypeError("cannot freeze ENV");
-            }
+            if (freeze != null && freeze.isTrue()) throw typeError(context, "Cannot clone ENV");
 
             return rbClone(context);
         }
@@ -660,7 +700,7 @@ public class RubyGlobal {
         @JRubyMethod()
         @Override
         public IRubyObject dup(ThreadContext context) {
-            throw context.runtime.newTypeError("Cannot dup ENV, use ENV.to_h to get a copy of ENV as a hash");
+            throw typeError(context, "Cannot dup ENV, use ENV.to_h to get a copy of ENV as a hash");
         }
 
         private final RaiseException concurrentModification() {
@@ -671,6 +711,16 @@ public class RubyGlobal {
         @Override
         protected void replaceWith(ThreadContext context, RubyHash otherHash) {
             replaceExternally(context, otherHash);
+        }
+
+        @Override
+        protected void appendAssociation(boolean keyIsSymbol, ByteList bytes) {
+            if (keyIsSymbol) {
+                // key should never be Symbol for ENV
+                bytes.append(':');
+            } else {
+                bytes.append(HASHROCKET_WITH_SPACES);
+            }
         }
     }
 
@@ -699,7 +749,7 @@ public class RubyGlobal {
 
         @Override
         public RubyHash to_hash(ThreadContext context) {
-            RubyHash hash = RubyHash.newHash(context.runtime);
+            RubyHash hash = Create.newHash(context);
             hash.replace(context, this);
             return hash;
         }
@@ -708,9 +758,7 @@ public class RubyGlobal {
         protected IRubyObject internalGet(IRubyObject key) {
             if (size == 0) return null;
 
-            if (!isCaseSensitive()) {
-                key = getCorrectKey(key.convertToString());
-            }
+            if (!isCaseSensitive()) key = getCorrectKey(key.convertToString());
 
             return super.internalGet(key);
         }
@@ -720,20 +768,11 @@ public class RubyGlobal {
             return case_aware_op_aset(context, key, value);
         }
 
-        @Override
-        @Deprecated
-        public IRubyObject op_aset19(ThreadContext context, IRubyObject key, IRubyObject value) {
-            return op_aset(context, key, value);
-        }
-
         private IRubyObject case_aware_op_aset(ThreadContext context, IRubyObject key, final IRubyObject value) {
             RubyString keyAsStr = verifyValidKey(context, verifyStringLike(context, key).convertToString(), value);
-
             if (!isCaseSensitive()) key = keyAsStr = getCorrectKey(keyAsStr);
 
-            if (value == context.nil) {
-                return super.delete(context, key, org.jruby.runtime.Block.NULL_BLOCK);
-            }
+            if (value == context.nil) return super.delete(context, key, org.jruby.runtime.Block.NULL_BLOCK);
 
             IRubyObject valueAsStr = newName(context, keyAsStr, verifyStringLike(context, value).convertToString());
 
@@ -744,8 +783,8 @@ public class RubyGlobal {
                 if (valueAsStr == context.nil) {
                     synchronized (Object.class) { posix.unsetenv(keyAsJava); }
                 } else {
-                    EnvStringValidation.ensureValidEnvString(context.getRuntime(), value, "value");
-                    EnvStringValidation.ensureValidEnvString(context.getRuntime(), key, "key");
+                    EnvStringValidation.ensureValidEnvString(context, value, "value");
+                    EnvStringValidation.ensureValidEnvString(context, key, "key");
 
                     final String valueAsJava = valueAsStr.asJavaString();
                     synchronized (Object.class) { posix.setenv(keyAsJava, valueAsJava, 1); }
@@ -759,9 +798,7 @@ public class RubyGlobal {
 
         protected static IRubyObject verifyStringLike(ThreadContext context, IRubyObject test) {
             IRubyObject string = test.checkStringType();
-            if (string.isNil()) {
-                throw context.runtime.newTypeError("no implicit conversion of " + test.getMetaClass() + " into String");
-            }
+            if (string.isNil()) throw typeError(context, "no implicit conversion of ", test, " into String");
 
             return string;
         }
@@ -803,24 +840,18 @@ public class RubyGlobal {
         // MRI: env_name_new
         // TODO: mri 3.1 does not use env_name_new
         protected static IRubyObject newName(ThreadContext context, IRubyObject key, IRubyObject valueArg) {
-            if (valueArg.isNil()) return context.nil;
-
-            RubyString value = (RubyString) valueArg;
-
-            return newString(context, value);
+            return valueArg.isNil() ? context.nil : newString(context, (RubyString) valueArg);
         }
 
         protected static IRubyObject newString(ThreadContext context, RubyString value, Encoding encoding) {
-            IRubyObject result = newExternalStringWithEncoding(context.runtime, value.strDup(context.runtime).getByteList().shallowDup(), encoding);
-
+            IRubyObject result = newExternalStringWithEncoding(context.runtime, value.getByteList().dup(), encoding);
             result.setFrozen(true);
-
             return result;
         }
 
         // MRI: env_str_new
         protected static IRubyObject newString(ThreadContext context, RubyString value) {
-            return newString(context, value, context.runtime.getEncodingService().getEnvEncoding());
+            return newString(context, value, encodingService(context).getEnvEncoding());
         }
 
         // MRI: env_str_new2
@@ -829,7 +860,7 @@ public class RubyGlobal {
         }
 
         private static boolean equalIgnoreCase(ThreadContext context, final RubyString str1, final RubyString str2) {
-            return ((RubyFixnum) str1.casecmp(context, str2)).isZero();
+            return ((RubyFixnum) str1.casecmp(context, str2)).isZero(context);
         }
 
     }
@@ -844,9 +875,7 @@ public class RubyGlobal {
         }
 
         public void modify() {
-            if (isFrozen()) {
-                throw getRuntime().newTypeError("ENV_JAVA is not writable until you require 'java'");
-            }
+            if (isFrozen()) throw typeError(getRuntime().getCurrentContext(), "ENV_JAVA is not writable until you require 'java'");
         }
     }
 
@@ -857,13 +886,13 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject set(IRubyObject value) {
-            runtime.getWarnings().warnDeprecated(ID.INEFFECTIVE_GLOBAL, "warning: variable " + name + " is no longer effective; ignored");
+            warnDeprecated(runtime.getCurrentContext(), "warning: variable " + name + " is no longer effective; ignored");
             return value;
         }
 
         @Override
         public IRubyObject get() {
-            runtime.getWarnings().warnDeprecated(ID.INEFFECTIVE_GLOBAL, "warning: variable " + name + " is no longer effective");
+            warnDeprecated(runtime.getCurrentContext(), "warning: variable " + name + " is no longer effective");
             return value;
         }
     }
@@ -875,13 +904,14 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject get() {
-            IRubyObject lastExitStatus = runtime.getCurrentContext().getLastExitStatus();
-            return lastExitStatus == null ? runtime.getNil() : lastExitStatus;
+            var context = runtime.getCurrentContext();
+            IRubyObject lastExitStatus = context.getLastExitStatus();
+            return lastExitStatus == null ? context.nil : lastExitStatus;
         }
 
         @Override
         public IRubyObject set(IRubyObject lastExitStatus) {
-            throw runtime.newNameError("$? is a read-only variable", "$?");
+            throw nameError(runtime.getCurrentContext(), "$? is a read-only variable", "$?");
         }
     }
 
@@ -892,7 +922,8 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject get() {
-            return RubyRegexp.last_match(runtime.getCurrentContext().getBackRef());
+            var context = runtime.getCurrentContext();
+            return RubyRegexp.last_match(context, context.getBackRef());
         }
     }
 
@@ -903,7 +934,8 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject get() {
-            return RubyRegexp.match_pre(runtime.getCurrentContext().getBackRef());
+            var context = runtime.getCurrentContext();
+            return RubyRegexp.match_pre(context, context.getBackRef());
         }
     }
 
@@ -914,7 +946,8 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject get() {
-            return RubyRegexp.match_post(runtime.getCurrentContext().getBackRef());
+            var context = runtime.getCurrentContext();
+            return RubyRegexp.match_post(context, context.getBackRef());
         }
     }
 
@@ -925,7 +958,8 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject get() {
-            return RubyRegexp.match_last(runtime.getCurrentContext().getBackRef());
+            var context = runtime.getCurrentContext();
+            return RubyRegexp.match_last(context, context.getBackRef());
         }
     }
 
@@ -942,12 +976,13 @@ public class RubyGlobal {
         @Override
         public IRubyObject set(IRubyObject value) {
             ThreadContext context = runtime.getCurrentContext();
+
             if (value.isNil()) {
                 context.clearBackRef();
-            } else if (value instanceof RubyMatchData) {
-                context.setBackRef((RubyMatchData) value);
+            } else if (value instanceof RubyMatchData match) {
+                context.setBackRef(match);
             } else {
-                throw runtime.newTypeError(value, runtime.getMatchData());
+                throw typeError(context, value, "MatchData");
             }
 
             return value;
@@ -963,7 +998,7 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject set(IRubyObject value) {
-            int line = (int)value.convertToInteger().getLongValue();
+            int line = toInt(runtime.getCurrentContext(), value);
             runtime.setCurrentLine(line);
             return value;
         }
@@ -974,21 +1009,10 @@ public class RubyGlobal {
         }
     }
 
-    private static class ErrorInfoGlobalVariable extends GlobalVariable {
+    private static class ErrorInfoGlobalVariable extends ReadonlyGlobalVariable {
         public ErrorInfoGlobalVariable(Ruby runtime, String name, IRubyObject value) {
             super(runtime, name, null);
-            set(value);
-        }
-
-        @Override
-        public IRubyObject set(IRubyObject value) {
-            if (!value.isNil() &&
-                    !runtime.getException().isInstance(value) &&
-                    !(JavaUtil.isJavaObject(value) && JavaUtil.unwrapJavaObject(value) instanceof Throwable)) {
-                throw runtime.newTypeError("assigning non-exception to $!");
-            }
-
-            return runtime.getCurrentContext().setErrorInfo(value);
+            runtime.getCurrentContext().setErrorInfo(value);
         }
 
         @Override
@@ -1006,7 +1030,7 @@ public class RubyGlobal {
         @Override
         public IRubyObject set(IRubyObject value) {
             if (!value.isNil() && ! (value instanceof RubyString)) {
-                throw runtime.newTypeError("value of " + name() + " must be a String");
+                throw typeError(value.getRuntime().getCurrentContext(), "value of " + name() + " must be String");
             }
             return super.set(value);
         }
@@ -1020,10 +1044,10 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject set(IRubyObject value) {
-            RubyArgsFile.inplace_mode_set(runtime.getCurrentContext(), runtime.getArgsFile(), value);
-            if (value.isNil() || !value.isTrue()) {
-                runtime.getInstanceConfig().setInPlaceBackupExtension(null);
-            }
+            var context = runtime.getCurrentContext();
+            RubyArgsFile.inplace_mode_set(context, argsFile(context), value);
+            if (value.isNil() || !value.isTrue()) instanceConfig(context).setInPlaceBackupExtension(null);
+
             return super.set(value);
         }
     }
@@ -1037,7 +1061,7 @@ public class RubyGlobal {
         public IRubyObject set(IRubyObject value) {
             IRubyObject result = super.set(value);
 
-            if (!value.isNil()) warnDeprecatedGlobal(runtime, name);
+            if (!value.isNil()) warnDeprecatedGlobal(runtime.getCurrentContext(), name);
 
             return result;
         }
@@ -1052,7 +1076,7 @@ public class RubyGlobal {
         public IRubyObject set(IRubyObject value) {
             IRubyObject result = super.set(value);
 
-            if (!result.isNil()) warnDeprecatedGlobal(runtime, name);
+            if (!result.isNil()) warnDeprecatedGlobal(runtime.getCurrentContext(), name);
 
             return result;
         }
@@ -1066,7 +1090,7 @@ public class RubyGlobal {
         @Override
         public IRubyObject set(IRubyObject value) {
             if (!value.isNil() && ! (value instanceof RubyString) && ! (value instanceof RubyRegexp)) {
-                throw runtime.newTypeError("value of " + name() + " must be String or Regexp");
+                throw typeError(value.getRuntime().getCurrentContext(), "value of " + name() + " must be String or Regexp");
             }
             return super.set(value);
         }
@@ -1109,12 +1133,12 @@ public class RubyGlobal {
     }
 
     private static class WarningGlobalVariable extends ReadonlyGlobalVariable {
-        public WarningGlobalVariable(Ruby runtime, String name, RubyInstanceConfig.Verbosity verbosity) {
-            super(runtime, name,
-                    verbosity == RubyInstanceConfig.Verbosity.NIL   ? RubyFixnum.newFixnum(runtime, 0) :
-                    verbosity == RubyInstanceConfig.Verbosity.FALSE ? RubyFixnum.newFixnum(runtime, 1) :
-                    verbosity == RubyInstanceConfig.Verbosity.TRUE  ? RubyFixnum.newFixnum(runtime, 2) :
-                    runtime.getNil()
+        public WarningGlobalVariable(ThreadContext context, String name, RubyInstanceConfig.Verbosity verbosity) {
+            super(context.runtime, name,
+                    verbosity == RubyInstanceConfig.Verbosity.NIL   ? asFixnum(context, 0) :
+                    verbosity == RubyInstanceConfig.Verbosity.FALSE ? asFixnum(context, 1) :
+                    verbosity == RubyInstanceConfig.Verbosity.TRUE  ? asFixnum(context, 2) :
+                    context.nil
                     );
         }
     }
@@ -1144,21 +1168,20 @@ public class RubyGlobal {
 
         @Override
         public IRubyObject get() {
-            IRubyObject errorInfo = runtime.getGlobalVariables().get("$!");
-            IRubyObject backtrace = errorInfo.isNil() ? runtime.getNil() : errorInfo.callMethod(errorInfo.getRuntime().getCurrentContext(), "backtrace");
+            var context = runtime.getCurrentContext();
+            IRubyObject errorInfo = globalVariables(context).get("$!");
+            IRubyObject backtrace = errorInfo.isNil() ? context.nil : errorInfo.callMethod(context, "backtrace");
+
             //$@ returns nil if $!.backtrace is not an array
-            if (!(backtrace instanceof RubyArray)) {
-                backtrace = runtime.getNil();
-            }
-            return backtrace;
+            return backtrace instanceof RubyArray ? backtrace : context.nil;
         }
 
         @Override
         public IRubyObject set(IRubyObject value) {
-            if (runtime.getGlobalVariables().get("$!").isNil()) {
-                throw runtime.newArgumentError("$! not set");
-            }
-            runtime.getGlobalVariables().get("$!").callMethod(value.getRuntime().getCurrentContext(), "set_backtrace", value);
+            var context = runtime.getCurrentContext();
+            if (globalVariables(context).get("$!").isNil()) throw argumentError(context, "$! not set");
+
+            globalVariables(context).get("$!").callMethod(context, "set_backtrace", value);
             return value;
         }
     }
@@ -1206,8 +1229,7 @@ public class RubyGlobal {
             }
 
             if (!value.respondsTo("write") && !value.respondsToMissing("write")) {
-                throw runtime.newTypeError(name() + " must have write method, " +
-                                    value.getType().getName() + " given");
+                throw typeError(value.getRuntime().getCurrentContext(), name() + " must have write method, ", value, " given");
             }
 
             return super.set(value);
@@ -1259,7 +1281,7 @@ public class RubyGlobal {
         }
 
         public IRubyObject setValue(IRubyObject newValue) {
-            throw runtime.newRuntimeError("cannot assign to $$");
+            throw runtimeError(runtime.getCurrentContext(), "cannot assign to $$");
         }
     }
 
@@ -1274,15 +1296,15 @@ public class RubyGlobal {
     ));
 
     private static class EnvStringValidation {
-        public static void ensureValidEnvString(Ruby runtime, IRubyObject str, String type) {
+        public static void ensureValidEnvString(ThreadContext context, IRubyObject str, String type) {
             RubyString value = str.asString();
 
-            if(!value.getByteList().getEncoding().isAsciiCompatible()){
-                throw runtime.newArgumentError("bad environment variable " + type + ": ASCII incompatible encoding: " + value.getByteList().getEncoding().toString());
+            if (!value.getByteList().getEncoding().isAsciiCompatible()) {
+                throw argumentError(context, "bad environment variable " + type + ": ASCII incompatible encoding: " + value.getByteList().getEncoding().toString());
             }
 
             if (value.toString().contains("\0")) {
-                throw runtime.newArgumentError("bad environment variable " + type + ": contains null byte");
+                throw argumentError(context, "bad environment variable " + type + ": contains null byte");
             }
         }
     }

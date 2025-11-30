@@ -29,6 +29,13 @@ end
 module PersistenceSpecUtils
   include CompilerSpecUtils
 
+  def initialize(*x, **y)
+    super
+    @persist_runtime = org.jruby.Ruby.newInstance
+  end
+
+  attr_reader :persist_runtime
+
   def run_in_method(src, filename = caller_locations[0].path, line = caller_locations[0].lineno)
     run( "def __temp; #{src}; end; __temp", filename, line)
   end
@@ -42,24 +49,37 @@ module PersistenceSpecUtils
   private
 
   def encode_decode_run(src, filename, line)
-    runtime = JRuby.runtime
-    manager = runtime.getIRManager()
-
-    method = JRuby.compile_ir(src, filename, false, line - 1)
-
-    top_self = runtime.top_self
+    # persist with separate runtime
+    jruby_module = persist_runtime.eval_scriptlet("require 'jruby'; JRuby")
+    persist_context = persist_runtime.current_context
+    persist_src = persist_runtime.new_string(src)
+    persist_filename = persist_runtime.new_string(src)
+    persist_line = persist_runtime.new_fixnum(line - 1)
+    method = org.jruby.ext.jruby.JRubyLibrary.compile_ir(
+      persist_context,
+      jruby_module,
+      [persist_src,
+       persist_filename,
+       persist_runtime.false,
+       persist_line].to_java(org.jruby.runtime.builtin.IRubyObject),
+      org.jruby.runtime.Block::NULL_BLOCK)
 
     # encode and decode
     baos = java.io.ByteArrayOutputStream.new
     writer = org.jruby.ir.persistence.IRWriterStream.new(baos)
     org.jruby.ir.persistence.IRWriter.persist(writer, method)
 
+    # interpret with test runtime
+    runtime = JRuby.runtime
+    context = runtime.get_current_context
+    manager = runtime.getIRManager()
+    top_self = runtime.top_self
+
     reader = org.jruby.ir.persistence.IRReaderStream.new(manager, baos.to_byte_array, filename.to_java)
     method = org.jruby.ir.persistence.IRReader.load(manager, reader)
 
-    # interpret
     interpreter = org.jruby.ir.interpreter.Interpreter.new
-    interpreter.execute(runtime, method, top_self)
+    interpreter.execute(context, method, top_self)
   end
 end
 
@@ -96,7 +116,8 @@ module JITSpecUtils
 
     compiler = new_visitor(runtime)
     compiled = compiler.compile(method, org.jruby.util.OneShotClassLoader.new(runtime.getJRubyClassLoader()))
-    scriptMethod = compiled.getMethod("RUBY$script",
+    scriptMethod = compiled.getMethod(
+        org.jruby.util.JavaNameMangler::SCRIPT_METHOD_NAME,
         org.jruby.runtime.ThreadContext.java_class,
         org.jruby.parser.StaticScope.java_class,
         org.jruby.runtime.builtin.IRubyObject.java_class,
@@ -182,6 +203,11 @@ modes.each do |mode|
       run('i = 1; a = "hello#{i + 42}"; a') {|result| expect(result).to eq("hello43") }
       # same cases in presence of refinements
       run('class NoToS; end; module AddToS; refine(NoToS){def to_s; "42"; end}; end; class TryToS; using AddToS; def self.a; "hello#{NoToS.new}"; end; end; TryToS.a') {|result| expect(result).to eq('hello42') }
+
+      # https://github.com/jruby/jruby/issues/8847
+      pid_dstr_32_times = '#{$$}' * 32
+      pid_32_times = ([$$] * 32).join('')
+      run("\"hello#{pid_dstr_32_times}\"") {|result| expect(result).to eq('hello' + pid_32_times) }
     end
 
     it "compiles calls" do
@@ -294,7 +320,7 @@ modes.each do |mode|
         }
         arr << x
         arr
-        EOS
+      EOS
       run(blocks_code) {|result| expect(result).to eq([1,2,3,4,5,6]) }
     end
 
@@ -309,7 +335,7 @@ modes.each do |mode|
           yield
         end
         foo { 1 }
-        EOS
+      EOS
       run(yield_in_block) {|result| expect(result).to eq 1}
 
       yield_in_proc = <<-EOS
@@ -318,7 +344,7 @@ modes.each do |mode|
         end
         p = foo { 1 }
         p.call
-        EOS
+      EOS
       run(yield_in_proc) {|result| expect(result).to eq 1 }
     end
 
@@ -350,7 +376,7 @@ modes.each do |mode|
           end
         end
         CompiledClass1.new.foo
-        EOS
+      EOS
       run(class_string) {|result| expect(result).to eq 'cc1' }
     end
 
@@ -432,13 +458,13 @@ modes.each do |mode|
     end
 
     it "compiles singleton method definitions" do
-      run("a = 'bar'; def a.foo; 'foo'; end; a.foo") {|result| expect(result).to eq "foo" }
+      run("a = +'bar'; def a.foo; 'foo'; end; a.foo") {|result| expect(result).to eq "foo" }
       run("class Integer; def self.foo; 'foo'; end; end; Integer.foo") {|result| expect(result).to eq "foo" }
       run("def String.foo; 'foo'; end; String.foo") {|result| expect(result).to eq "foo" }
     end
 
     it "compiles singleton class definitions" do
-      run("a = 'bar'; class << a; def bar; 'bar'; end; end; a.bar") {|result| expect(result).to eq "bar" }
+      run("a = +'bar'; class << a; def bar; 'bar'; end; end; a.bar") {|result| expect(result).to eq "bar" }
       run("class Integer; class << self; def bar; 'bar'; end; end; end; Integer.bar") {|result| expect(result).to eq "bar" }
       run("class Integer; def self.metaclass; class << self; self; end; end; end; Integer.metaclass") do |result|
         expect(result).to eq class << Integer; self; end
@@ -474,7 +500,7 @@ modes.each do |mode|
     end
 
     it "compiles splatted element assignment" do
-      run("a = 'foo'; y = ['o']; a[*y] = 'asdf'; a") {|result| expect(result).to match "fasdfo" }
+      run("a = +'foo'; y = ['o']; a[*y] = 'asdf'; a") {|result| expect(result).to match "fasdfo" }
     end
 
     it "compiles constant access" do
@@ -591,42 +617,86 @@ modes.each do |mode|
 
     it "handles optimized homogeneous case/when" do
       run('
-        case "a"
-        when "b"
-          fail
-        when "a"
-          1
-        else
-          fail
+        ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"].map do |x|
+          case x
+          when "a"
+            1
+          when "b"
+            2
+          when "c"
+            3
+          when "d"
+            4
+          when "e"
+            5
+          when "f"
+            6
+          when "g"
+            7
+          when "h"
+            8
+          when "i"
+            9
+          when "j"
+            10
+          else
+            fail
+          end
         end
       ') do |result|
-        expect(result).to eq 1
+        expect(result).to eq [1,2,3,4,5,6,7,8,9,10]
       end
 
       run('
-        case :a
-        when :b
-          fail
-        when :a
-          1
-        else
-          fail
-        end
+        [:zxcvbnmzxcvbnm, :qwertyuiopqwertyuiop, :asdfghjklasdfghjkl, :a, :z].map do |x|
+          case x
+          when :zxcvbnmzxcvbnm
+            1
+          when :qwertyuiopqwertyuiop
+            2
+          when :asdfghjklasdfghjkl
+            3
+          when :a
+            4
+          when :z
+            5
+          else
+            fail
+          end
+          end
       ') do |result|
-        expect(result).to eq 1
+        expect(result).to eq [1,2,3,4,5]
       end
 
       run('
-        case 1
-        when 2
-          fail
-        when 1
-          1
-        else
-          fail
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map do |x|
+          case x
+          when 1
+            1
+          when 2
+            2
+          when 3
+            3
+          when 4
+            4
+          when 5
+            5
+          when 6
+            6
+          when 7
+            7
+          when 8
+            8
+          when 9
+            9
+          when 10
+            10
+          else
+            fail
+          end
         end
       ') do |result|
-        expect(result).to eq 1
+        expect(result).to eq [1,2,3,4,5,6,7,8,9,10]
       end
     end     
 
@@ -769,7 +839,6 @@ modes.each do |mode|
 
     it "properly resets $! to nil upon normal exit from a rescue" do
       # test that $! is getting reset/cleared appropriately
-      $! = nil
       run("begin; raise; rescue; end; $!") {|result| expect(result).to be_nil }
       run("1.times { begin; raise; rescue; next; end }; $!") {|result| expect(result).to be_nil }
       run("begin; raise; rescue; begin; raise; rescue; end; $!; end") {|result| expect(result).to_not be_nil }
@@ -1496,6 +1565,33 @@ modes.each do |mode|
         end
         BZSuper.new.z_super
       SUPER
+    end
+
+    it "compiles debug chilled strings that can be modified without impacting other strings" do
+      JRuby.runtime.instance_config.debugging_frozen_string_literal = true
+      run(<<~CHILLED) {|val| expect(val).to eq("")}
+        str = ""
+        str << "hello"
+        ""
+      CHILLED
+    ensure
+      JRuby.runtime.instance_config.debugging_frozen_string_literal = false
+    end
+
+    it "compiles very long dynamic strings" do
+      run('"a#{$$}a#{$$}a#{$$}a#{$$}"') do
+        expect(it).to eq("a#{$$}" * 4)
+      end
+      run('"a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}a#{$$}"') do
+        expect(it).to eq("a#{$$}" * 24)
+      end
+    end
+
+    it "can invoke java.lang.reflect.Proxy dynamic proxy objects" do
+      run(<<~RUBY) { expect(it).to eq [1].to_java }
+        proxy = java.lang.reflect.Proxy.newProxyInstance(JRuby.runtime.jruby_class_loader, [java.util.function.Function].to_java(java.lang.Class)) {|o, m, x| x}
+        proxy.apply(1)
+      RUBY
     end
   end
 end

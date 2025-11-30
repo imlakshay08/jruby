@@ -12,6 +12,8 @@ import org.jruby.RubyModule;
 import org.jruby.RubyObject;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
+import org.jruby.api.Convert;
+import org.jruby.api.Create;
 import org.jruby.ext.ffi.Enums;
 import org.jruby.ext.ffi.NativeType;
 import org.jruby.ext.ffi.Pointer;
@@ -20,7 +22,9 @@ import org.jruby.runtime.Arity;
 import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
-import org.jruby.util.TypeConverter;
+
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Error.typeError;
 
 @JRubyClass(name = "FFI::VariadicInvoker", parent = "Object")
 public class VariadicInvoker extends RubyObject {
@@ -34,14 +38,10 @@ public class VariadicInvoker extends RubyObject {
     private static final java.util.Locale LOCALE = java.util.Locale.ENGLISH;
 
 
-    public static RubyClass createVariadicInvokerClass(Ruby runtime, RubyModule module) {
-        RubyClass result = module.defineClassUnder("VariadicInvoker",
-                runtime.getObject(),
-                ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);
-        result.defineAnnotatedMethods(VariadicInvoker.class);
-        result.defineAnnotatedConstants(VariadicInvoker.class);
-
-        return result;
+    public static RubyClass createVariadicInvokerClass(ThreadContext context, RubyModule FFI, RubyClass Object) {
+        return FFI.defineClassUnder(context, "VariadicInvoker", Object, ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR).
+                defineMethods(context, VariadicInvoker.class).
+                defineConstants(context, VariadicInvoker.class);
     }
 
     private VariadicInvoker(Ruby runtime, IRubyObject klazz, Pointer address,
@@ -79,51 +79,44 @@ public class VariadicInvoker extends RubyObject {
         boolean saveError = true;
         IRubyObject typeMap = null;
 
-        IRubyObject rbConvention = options.fastARef(context.runtime.newSymbol("convention"));
+        IRubyObject rbConvention = options.fastARef(Convert.asSymbol(context, "convention"));
         if (rbConvention != null && !rbConvention.isNil()) {
             convention = rbConvention.asJavaString();
         }
 
-        IRubyObject rbSaveErrno = options.fastARef(context.runtime.newSymbol("save_errno"));
+        IRubyObject rbSaveErrno = options.fastARef(Convert.asSymbol(context, "save_errno"));
         if (rbSaveErrno != null && !rbSaveErrno.isNil()) {
             saveError = rbSaveErrno.isTrue();
         }
 
-        enums = options.fastARef(context.runtime.newSymbol("enums"));
+        enums = options.fastARef(Convert.asSymbol(context, "enums"));
         if (enums != null && !enums.isNil() && !(enums instanceof RubyHash || enums instanceof Enums)) {
-            throw context.runtime.newTypeError("wrong type for options[:enum] "
-                + enums.getMetaClass().getName() + " (expected Hash or Enums)");
-
+            throw typeError(context, "wrong type for options[:enum] ", enums, " (expected Hash or Enums)");
         }
-        typeMap = options.fastARef(context.runtime.newSymbol("type_map"));
-        if (typeMap != null && !typeMap.isNil() && !(typeMap instanceof RubyHash)) {
-            throw context.runtime.newTypeError("wrong type for options[:type_map] "
-                    + typeMap.getMetaClass().getName() + " (expected Hash)");
 
+        typeMap = options.fastARef(Convert.asSymbol(context, "type_map"));
+        if (typeMap != null && !typeMap.isNil() && !(typeMap instanceof RubyHash)) {
+            throw typeError(context, "wrong type for options[:type_map] ", typeMap, " (expected Hash)");
         }
 
         final Type returnType = org.jruby.ext.ffi.Util.findType(context, rbReturnType, typeMap);
 
-        if (!(rbParameterTypes instanceof RubyArray)) {
-            throw context.runtime.newTypeError("Invalid parameter array "
-                    + rbParameterTypes.getMetaClass().getName() + " (expected Array)");
+        if (!(rbParameterTypes instanceof RubyArray<?> paramTypes)) {
+            throw typeError(context, "Invalid parameter array ", rbParameterTypes, " (expected Array)");
         }
 
-        if (!(rbFunction instanceof Pointer)) {
-            throw context.runtime.newTypeError(rbFunction, context.runtime.getFFI().pointerClass);
-        }
-        final Pointer address = (Pointer) rbFunction;
+        if (!(rbFunction instanceof Pointer address)) throw typeError(context, rbFunction, context.runtime.getFFI().pointerClass);
 
-        CallingConvention callConvention = "stdcall".equals(convention)
-                        ? CallingConvention.STDCALL : CallingConvention.DEFAULT;
+        CallingConvention callConvention = "stdcall".equals(convention) ?
+                CallingConvention.STDCALL : CallingConvention.DEFAULT;
 
-        RubyArray paramTypes = (RubyArray) rbParameterTypes;
-        RubyArray fixed = RubyArray.newArray(context.runtime);
+        int length = paramTypes.getLength();
+        var fixed = Create.allocArray(context, length);
         int fixedParamCount = 0;
-        for (int i = 0; i < paramTypes.getLength(); ++i) {
+        for (int i = 0; i < length; ++i) {
             Type type = (Type)paramTypes.entry(i);
             if (type.getNativeType() != org.jruby.ext.ffi.NativeType.VARARGS) {
-                fixed.append(type);
+                fixed.append(context, type);
                 fixedParamCount++;
             }
         }
@@ -144,7 +137,7 @@ public class VariadicInvoker extends RubyObject {
         IRubyObject[] params = ((RubyArray) paramsArg).toJavaArrayMaybeUnsafe();
         com.kenai.jffi.Type[] ffiParamTypes = new com.kenai.jffi.Type[types.length];
         ParameterMarshaller[] marshallers = new ParameterMarshaller[types.length];
-        RubyClass builtinClass = Type.getTypeClass(context.getRuntime()).getClass("Builtin");
+        RubyClass builtinClass = Type.getTypeClass(context.runtime).getClass(context, "Builtin");
 
         for (int i = 0; i < types.length; ++i) {
             Type type = (Type) types[i];
@@ -153,18 +146,18 @@ public class VariadicInvoker extends RubyObject {
                 case SHORT:
                 case INT:
                     ffiParamTypes[i] = com.kenai.jffi.Type.SINT32;
-                    marshallers[i] = DefaultMethodFactory.getMarshaller((Type)builtinClass.getConstant(NativeType.INT.name().toUpperCase(LOCALE)), convention, enums);
+                    marshallers[i] = DefaultMethodFactory.getMarshaller((Type)builtinClass.getConstant(context, NativeType.INT.name().toUpperCase(LOCALE)), convention, enums);
                     break;
                 case UCHAR:
                 case USHORT:
                 case UINT:
                     ffiParamTypes[i] = com.kenai.jffi.Type.UINT32;
-                    marshallers[i] = DefaultMethodFactory.getMarshaller((Type)builtinClass.getConstant(NativeType.UINT.name().toUpperCase(LOCALE)), convention, enums);
+                    marshallers[i] = DefaultMethodFactory.getMarshaller((Type)builtinClass.getConstant(context, NativeType.UINT.name().toUpperCase(LOCALE)), convention, enums);
                     break;
                 case FLOAT:
                 case DOUBLE:
                     ffiParamTypes[i] = com.kenai.jffi.Type.DOUBLE;
-                    marshallers[i] = DefaultMethodFactory.getMarshaller((Type)builtinClass.getConstant(NativeType.DOUBLE.name().toUpperCase(LOCALE)), convention, enums);
+                    marshallers[i] = DefaultMethodFactory.getMarshaller((Type)builtinClass.getConstant(context, NativeType.DOUBLE.name().toUpperCase(LOCALE)), convention, enums);
                     break;
                 default:
                     ffiParamTypes[i] = FFIUtil.getFFIType(type);

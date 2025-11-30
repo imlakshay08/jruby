@@ -35,10 +35,16 @@ import org.jruby.RubyHash;
 import org.jruby.RubyModule;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
+import org.jruby.api.Convert;
 import org.jruby.runtime.Arity;
-import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
+
+import static org.jruby.api.Convert.asSymbol;
+import static org.jruby.api.Convert.castAsArray;
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Error.typeError;
+import static org.jruby.runtime.ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR;
 
 /**
  * Defines a C callback's parameters and return type.
@@ -49,28 +55,14 @@ public class CallbackInfo extends Type {
     
     /** The arity of this function. */
     protected final Arity arity;
-
     protected final Type[] parameterTypes;
     protected final Type returnType;
     protected final boolean stdcall;
 
-
-    /**
-     * Creates a CallbackInfo class for a ruby runtime
-     *
-     * @param runtime The runtime to create the class for
-     * @param module The module to place the class in
-     *
-     * @return The newly created ruby class
-     */
-    public static RubyClass createCallbackInfoClass(Ruby runtime, RubyModule module) {
-        final RubyClass Type = module.getClass("Type");
-        RubyClass result = module.defineClassUnder(CLASS_NAME, Type, ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);
-        result.defineAnnotatedMethods(CallbackInfo.class);
-        result.defineAnnotatedConstants(CallbackInfo.class);
-
-        Type.setConstant("Function", result);
-        return result;
+    public static RubyClass createCallbackInfoClass(ThreadContext context, RubyModule module, RubyClass Type) {
+        return (RubyClass) Type.setConstant(context, "Function",
+                module.defineClassUnder(context, CLASS_NAME, Type, NOT_ALLOCATABLE_ALLOCATOR).
+                        defineMethods(context, CallbackInfo.class).defineConstants(context, CallbackInfo.class));
     }
     
     /**
@@ -100,49 +92,30 @@ public class CallbackInfo extends Type {
      */
     @JRubyMethod(name = "new", meta = true, required = 2, optional = 1, checkArity = false)
     public static final IRubyObject newCallbackInfo(ThreadContext context, IRubyObject klass,
-            IRubyObject[] args)
-    {
+            IRubyObject[] args) {
         int argc = Arity.checkArgumentCount(context, args, 2, 3);
+        IRubyObject returnType = args[0];
 
-        IRubyObject returnType = args[0], paramTypes = args[1];
+        if (!(returnType instanceof Type)) throw typeError(context, returnType.getMetaClass(), "FFI::Type");
+        var paramTypes = Convert.castAsArray(context, args[1]);
 
-        if (!(returnType instanceof Type)) {
-            throw context.runtime.newTypeError("wrong argument type "
-                    + returnType.getMetaClass().getName() + " (expected FFI::Type)");
-        }
+        if (returnType instanceof MappedType mappedType) returnType = mappedType.getRealType();
 
-        if (!(paramTypes instanceof RubyArray)) {
-            throw context.runtime.newTypeError("wrong argument type "
-                    + paramTypes.getMetaClass().getName() + " (expected Array)");
-        }
-
-        if (returnType instanceof MappedType) {
-            returnType = ((MappedType) returnType).getRealType();
-        }
-
-        Type[] nativeParamTypes = new Type[((RubyArray)paramTypes).size()];
+        Type[] nativeParamTypes = new Type[paramTypes.size()];
         for (int i = 0; i < nativeParamTypes.length; ++i) {
-            IRubyObject obj = ((RubyArray) paramTypes).entry(i);
-            if (!(obj instanceof Type)) {
-                throw context.runtime.newTypeError("wrong argument type "
-                        + obj.getMetaClass().getName() + " (expected array of FFI::Type)");
-            }
+            IRubyObject obj = paramTypes.entry(i);
+            if (!(obj instanceof Type)) throw typeError(context, obj, "array of FFI::Type");
             nativeParamTypes[i] = (Type) obj;
         }
 
         boolean stdcall = false;
         if (argc > 2) {
-            if (!(args[2] instanceof RubyHash)) {
-                throw context.runtime.newTypeError("wrong argument type "
-                        + args[2].getMetaClass().getName() + " (expected Enums or Hash)");
-            }
-            RubyHash hash = (RubyHash) args[2];
-            stdcall = "stdcall".equals(hash.get(context.runtime.newSymbol("convention")));
+            if (!(args[2] instanceof RubyHash hash)) throw typeError(context, args[2], "Enums or Hash");
+            stdcall = "stdcall".equals(hash.get(asSymbol(context, "convention")));
         }
         
         try {
-            return new CallbackInfo(context.runtime, (RubyClass) klass,
-                    (Type) returnType, nativeParamTypes, stdcall);
+            return new CallbackInfo(context.runtime, (RubyClass) klass, (Type) returnType, nativeParamTypes, stdcall);
         } catch (UnsatisfiedLinkError ex) {
             return context.nil;
         }
@@ -190,7 +163,7 @@ public class CallbackInfo extends Type {
             }
         }
         sb.append(" ], ").append(returnType.toString().toLowerCase()).append('>');
-        return context.runtime.newString(sb.toString());
+        return newString(context, sb.toString());
     }
     @Override
     public final String toString() {

@@ -49,26 +49,21 @@ latest_source_cache
 core/src/main/java/META-INF/
 lib/jni
 lib/jruby*.jar
+lib/jruby*.jsa*
 lib/native
-lib/ruby/cext/
 lib/ruby/gems
 
 # Ruby stdlib files installed from external sources
 lib/ruby/stdlib/**/maven-metadata-local.xml
 lib/ruby/stdlib/*.jar
-lib/ruby/stdlib/abbrev*
 lib/ruby/stdlib/ant*
-lib/ruby/stdlib/base64*
 lib/ruby/stdlib/benchmark*
-lib/ruby/stdlib/bigdecimal*
 lib/ruby/stdlib/bundler*
 lib/ruby/stdlib/cgi*
-lib/ruby/stdlib/csv*
 lib/ruby/stdlib/debug*
 lib/ruby/stdlib/delegate*
 lib/ruby/stdlib/did_you_mean*
 lib/ruby/stdlib/digest*
-lib/ruby/stdlib/drb*
 lib/ruby/stdlib/English*
 lib/ruby/stdlib/erb*
 lib/ruby/stdlib/error_highlight*
@@ -77,9 +72,6 @@ lib/ruby/stdlib/fiddle*
 lib/ruby/stdlib/fileutils*
 lib/ruby/stdlib/find*
 lib/ruby/stdlib/forwardable*
-lib/ruby/stdlib/gauntlet_rdoc.rb
-lib/ruby/stdlib/getoptlong*
-lib/ruby/stdlib/hoe*
 lib/ruby/stdlib/io/console*
 lib/ruby/stdlib/io/wait*
 lib/ruby/stdlib/ipaddr*
@@ -94,11 +86,9 @@ lib/ruby/stdlib/libfixposix*
 lib/ruby/stdlib/logger*
 lib/ruby/stdlib/matrix*
 lib/ruby/stdlib/minitest*
-lib/ruby/stdlib/mutex_m.rb
 lib/ruby/stdlib/net/protocol*
 lib/ruby/stdlib/net/http*
 lib/ruby/stdlib/nkf*
-lib/ruby/stdlib/observer*
 lib/ruby/stdlib/open3*
 lib/ruby/stdlib/open-uri*
 lib/ruby/stdlib/optparse*
@@ -112,14 +102,10 @@ lib/ruby/stdlib/power_assert*
 lib/ruby/stdlib/prime*
 lib/ruby/stdlib/pstore*
 lib/ruby/stdlib/psych*
-lib/ruby/stdlib/random*
-lib/ruby/stdlib/racc*
 lib/ruby/stdlib/rake*
 lib/ruby/stdlib/rdoc*
 lib/ruby/stdlib/readline*
 lib/ruby/stdlib/reline*
-lib/ruby/stdlib/resolv-replace*
-lib/ruby/stdlib/rinda*
 lib/ruby/stdlib/ripper.jar
 lib/ruby/stdlib/ruby2_keywords*
 lib/ruby/stdlib/rubygems*
@@ -130,9 +116,10 @@ lib/ruby/stdlib/singleton*
 lib/ruby/stdlib/stringio*
 lib/ruby/stdlib/strscan*
 lib/ruby/stdlib/subspawn*
+lib/ruby/stdlib/syntax_suggest*
+lib/ruby/stdlib/tempfile.rb
 lib/ruby/stdlib/time.rb
 lib/ruby/stdlib/timeout*
-lib/ruby/stdlib/tracer*
 lib/ruby/stdlib/tsort*
 lib/ruby/stdlib/un*
 lib/ruby/stdlib/uri*
@@ -155,7 +142,6 @@ rubyspec_temp
 !bin/gem
 !bin/update_rubygems
 !bin/bundle
-!bin/jruby.bash
 !bin/jruby.bat
 !bin/jrubyc
 !bin/jrubyc.bat
@@ -170,6 +156,7 @@ rubyspec_temp
 !bin/jgem
 !bin/jirb
 !bin/jirb_swing
+!bin/jruby
 !bin/jruby.bash
 !bin/jruby.bat
 !bin/jruby.dll

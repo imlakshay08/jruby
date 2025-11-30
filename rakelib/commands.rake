@@ -30,7 +30,7 @@ def jruby(java_options = {}, &code)
 
   java_options[:fork] ||= 'true'
   java_options[:failonerror] ||= 'true'
-  java_options[:classname] = 'org.jruby.Main'
+  java_options[:classname] = 'org.jruby.main.Main'
   java_options[:maxmemory] ||= JRUBY_LAUNCH_MEMORY
 
   puts "JAVA options: #{java_options.inspect}"
@@ -62,7 +62,7 @@ def mspec(mspec_options = {}, java_options = {}, &code)
   mspec_options[:objectspace_enabled] ||= true
   mspec_options[:thread_pooling] ||= false
   mspec_options[:reflection] ||= false
-  mspec_options[:format] ||= "m"
+  mspec_options[:format] ||= "d"
   mspec_options[:timeout] ||= 120
   ms = mspec_options
 

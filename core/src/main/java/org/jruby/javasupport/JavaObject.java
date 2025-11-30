@@ -56,6 +56,10 @@ import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.ByteList;
 import org.jruby.util.JRubyObjectInputStream;
 
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Error.typeError;
 import static org.jruby.javasupport.JavaUtil.unwrapJava;
 
 /**
@@ -67,7 +71,7 @@ import static org.jruby.javasupport.JavaUtil.unwrapJava;
  * @deprecated since 9.4
  * @author  jpetersen
  */
-@Deprecated // @JRubyClass(name="Java::JavaObject")
+@Deprecated(since = "9.4.0.0") // @JRubyClass(name="Java::JavaObject")
 public class JavaObject extends RubyObject {
 
     private static final Object NULL_LOCK = new Object();
@@ -94,27 +98,22 @@ public class JavaObject extends RubyObject {
         objectAccessor.set(this, object);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4-")
     public static JavaObject wrap(final Ruby runtime, final Object value) {
         if ( value != null ) {
-            if ( value instanceof Class ) {
-                return JavaClass.get(runtime, (Class<?>) value);
-            }
-            if ( value.getClass().isArray() ) {
-                return new JavaArray(runtime, value);
-            }
+            if ( value instanceof Class clazz) return JavaClass.get(runtime, clazz);
+            if ( value.getClass().isArray() ) return new JavaArray(runtime, value);
         }
-        return new JavaObject(runtime, runtime.getJavaSupport().getJavaModule().getClass("JavaObject"), value);
+        var context = runtime.getCurrentContext();
+        return new JavaObject(runtime, runtime.getJavaSupport().getJavaModule(context).getClass(context, "JavaObject"), value);
     }
 
     @JRubyMethod(meta = true)
-    public static IRubyObject wrap(final ThreadContext context,
-        final IRubyObject self, final IRubyObject object) {
+    public static IRubyObject wrap(final ThreadContext context, final IRubyObject self, final IRubyObject object) {
         final Object objectValue = unwrapJava(object, NEVER);
 
-        if ( objectValue == NEVER ) return context.nil;
-
-        return wrap(context.runtime, objectValue);
+        return objectValue == NEVER ?
+                context.nil : wrap(context.runtime, objectValue);
     }
 
     @Override
@@ -127,21 +126,14 @@ public class JavaObject extends RubyObject {
         return dataGetStruct();
     }
 
-    public static RubyClass createJavaObjectClass(Ruby runtime, RubyModule javaModule) {
-        // FIXME: Ideally JavaObject instances should be marshallable, which means that
-        // the JavaObject metaclass should have an appropriate allocator. JRUBY-414
-        RubyClass JavaObject = javaModule.defineClassUnder("JavaObject", runtime.getObject(), JAVA_OBJECT_ALLOCATOR);
+    public static RubyClass createJavaObjectClass(Ruby runtime, RubyClass Object, RubyModule javaModule) {
+        var context = runtime.getCurrentContext();
+        RubyClass JavaObject = javaModule.defineClassUnder(context, "JavaObject", Object, JAVA_OBJECT_ALLOCATOR).
+                tap(c -> c.getMetaClass().undefMethods(context, "new", "allocate"));
 
-        registerRubyMethods(runtime, JavaObject);
-
-        JavaObject.getMetaClass().undefineMethod("new");
-        JavaObject.getMetaClass().undefineMethod("allocate");
+        JavaObject.defineMethods(context, JavaObject.class);
 
         return JavaObject;
-    }
-
-    protected static void registerRubyMethods(Ruby runtime, RubyClass JavaObject) {
-        JavaObject.defineAnnotatedMethods(JavaObject.class);
     }
 
     @Override
@@ -166,68 +158,95 @@ public class JavaObject extends RubyObject {
     }
 
     @JRubyMethod
-    @Override
-    public RubyFixnum hash() {
-        return getRuntime().newFixnum(hashCode());
+    public RubyFixnum hash(ThreadContext context) {
+        return asFixnum(context, hashCode());
     }
 
     @JRubyMethod
     @Override
-    public IRubyObject to_s() {
-        return to_s(getRuntime(), dataGetStruct());
+    public IRubyObject to_s(ThreadContext context) {
+        return JavaProxyMethods.to_s(context, dataGetStruct());
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static IRubyObject to_s(Ruby runtime, Object dataStruct) {
-        return JavaProxyMethods.to_s(runtime, dataStruct);
+        return JavaProxyMethods.to_s(runtime.getCurrentContext(), dataStruct);
+    }
+
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject op_equal(final IRubyObject other) {
+        return op_equal(getCurrentContext(), other);
     }
 
     @JRubyMethod(name = {"==", "eql?"})
-    public IRubyObject op_equal(final IRubyObject other) {
-        return JavaProxyMethods.equals(getRuntime(), getValue(), other);
+    public IRubyObject op_equal(ThreadContext context, IRubyObject other) {
+        return JavaProxyMethods.equals(context.runtime, getValue(), other);
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static RubyBoolean op_equal(JavaProxy self, IRubyObject other) {
-        return JavaProxyMethods.equals(self.getRuntime(), self.getObject(), other);
+        return JavaProxyMethods.equals(self.getCurrentContext().runtime, self.getObject(), other);
     }
 
     @JRubyMethod(name = "equal?")
-    public IRubyObject same(final IRubyObject other) {
-        final Ruby runtime = getRuntime();
+    public IRubyObject same(ThreadContext context, final IRubyObject other) {
         final Object thisValue = getValue();
         final Object otherValue = unwrapJava(other, NEVER);
 
-        if ( otherValue == NEVER ) { // not a wrapped object
-            return runtime.getFalse();
-        }
+        if (otherValue == NEVER) return context.fals; // not a wrapped object
+        if (!(other instanceof JavaObject)) return context.fals;
 
-        if ( ! (other instanceof JavaObject) ) return runtime.getFalse();
-
-        return runtime.newBoolean(thisValue == otherValue);
+        return asBoolean(context, thisValue == otherValue);
     }
 
-    @JRubyMethod
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject same(final IRubyObject other) {
+        return same(getCurrentContext(), other);
+    }
+
+    @Deprecated(since = "10.0.0.0")
     public RubyString java_type() {
-        return getRuntime().newString(getJavaClass().getName());
+        return java_type(getCurrentContext());
     }
 
-    @Deprecated
+    @JRubyMethod
+    public RubyString java_type(ThreadContext context) {
+        return newString(context, getJavaClass().getName());
+    }
+
+    @Deprecated(since = "9.4-")
     public JavaClass java_class() {
-        return JavaClass.get(getRuntime(), getJavaClass());
+        return JavaClass.get(getCurrentContext().runtime, getJavaClass());
     }
 
-    @JRubyMethod
+    @Deprecated(since = "10.0.0.0")
     public IRubyObject get_java_class() {
-        return Java.getInstance(getRuntime(), getJavaClass());
+        return get_java_class(getCurrentContext());
     }
 
     @JRubyMethod
+    public IRubyObject get_java_class(ThreadContext context) {
+        return Java.getInstance(context.runtime, getJavaClass());
+    }
+
+    @Deprecated(since = "10.0.0.0")
     public RubyFixnum length() {
-        throw getRuntime().newTypeError("not a java array");
+        return length(getCurrentContext());
+    }
+
+    @JRubyMethod
+    public RubyFixnum length(ThreadContext context) {
+        throw typeError(context, "not a java array");
+    }
+
+    @Deprecated(since = "10.0.0.0")
+    public IRubyObject is_java_proxy() {
+        return is_java_proxy(getCurrentContext());
     }
 
     @JRubyMethod(name = "java_proxy?")
-    public IRubyObject is_java_proxy() {
-        return getRuntime().getTrue();
+    public IRubyObject is_java_proxy(ThreadContext context) {
+        return context.tru;
     }
 
     @JRubyMethod(name = "synchronized")
@@ -253,12 +272,11 @@ public class JavaObject extends RubyObject {
                 new ObjectOutputStream(baos).writeObject(getValue());
 
                 return context.runtime.newString(new ByteList(baos.toByteArray(), false));
-            }
-            catch (IOException ex) {
+            } catch (IOException ex) {
                 throw context.runtime.newIOErrorFromException(ex);
             }
         }
-        throw context.runtime.newTypeError("no marshal_dump is defined for class " + getJavaClass());
+        throw typeError(context, "no marshal_dump is defined for class " + getJavaClass());
     }
 
     @JRubyMethod
@@ -270,12 +288,10 @@ public class JavaObject extends RubyObject {
             dataWrapStruct(new JRubyObjectInputStream(context.runtime, bais).readObject());
 
             return this;
-        }
-        catch (IOException ex) {
+        } catch (IOException ex) {
             throw context.runtime.newIOErrorFromException(ex);
-        }
-        catch (ClassNotFoundException ex) {
-            throw context.runtime.newTypeError("Class not found unmarshaling Java type: " + ex.getLocalizedMessage());
+        } catch (ClassNotFoundException ex) {
+            throw typeError(context, "Class not found unmarshaling Java type: " + ex.getLocalizedMessage());
         }
     }
 

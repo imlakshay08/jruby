@@ -39,7 +39,6 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.Method;
 
-import jakarta.annotation.Generated;
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
@@ -130,8 +129,6 @@ public class IndyBinder extends AbstractProcessor {
 
             ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 
-            cw.visitAnnotation(p(Generated.class), true);
-
             cw.visit(Opcodes.V1_8, ACC_PUBLIC, ("org.jruby.gen." + qualifiedName + POPULATOR_SUFFIX).replace('.', '/'), null, "org/jruby/anno/TypePopulator", null);
 
             mv = new SkinnyMethodAdapter(cw, ACC_PUBLIC, "<init>", "()V", null, null);
@@ -191,8 +188,6 @@ public class IndyBinder extends AbstractProcessor {
             for (ExecutableElement method : ElementFilter.methodsIn(cd.getEnclosedElements())) {
                 JRubyMethod anno = method.getAnnotation(JRubyMethod.class);
                 if (anno == null) continue;
-
-                if (anno.compat() == org.jruby.CompatVersion.RUBY1_8) continue;
 
                 methodCount++;
 

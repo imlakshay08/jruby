@@ -35,6 +35,8 @@ import org.jcodings.Encoding;
 import org.jcodings.IntHolder;
 import org.jcodings.unicode.UnicodeCodeRange;
 import org.jruby.Ruby;
+import org.jruby.RubySymbol;
+import org.jruby.runtime.builtin.IRubyObject;
 
 public final class IdUtil {
     /**
@@ -72,7 +74,7 @@ public final class IdUtil {
     /**
      * rb_is_local_id and is_local_id
      */
-    @Deprecated
+    @Deprecated(since = "9.3.0.0")
     public static boolean isLocal(String id) {
         return !isGlobal(id) && !isClassVariable(id) && !isInstanceVariable(id) && !isConstant(id) && !isPredicate(id) && !isSpecial(id);
     }
@@ -96,6 +98,14 @@ public final class IdUtil {
             return isNameString(id, 1, len);
         }
         return false;
+    }
+
+    public static boolean isValidConstantName(IRubyObject id) {
+        if (id instanceof RubySymbol sym) {
+            return sym.validConstantName();
+        } else {
+            return isValidConstantName(id.asJavaString());
+        }
     }
 
     public static boolean isValidInstanceVariableName(String id) {
@@ -176,21 +186,6 @@ public final class IdUtil {
                 return true;
         }
         return false;
-    }
-
-    @Deprecated
-    public static boolean isValidConstantName19(String id) {
-        return isValidConstantName(id);
-    }
-
-    @Deprecated
-    public static boolean isNameCharacter19(char c) {
-        return isNameCharacter(c);
-    }
-
-    @Deprecated
-    public static boolean isNameString19(String id, int start, int limit) {
-        return isNameString(id, start, limit);
     }
 
     // mri: rb_enc_symname_type (minus support for allowed_attrset).
@@ -336,10 +331,10 @@ public final class IdUtil {
 
                     type = SymbolNameType.JUNK;
                     m++;
-                    if (m + 1 < e || (m < e && data.get(m) != '=')) break;
+                    if (m + 1 < e || m >= e || data.get(m) != '=') break;
                     // fall through
                 case '=':
-                    return SymbolNameType.OTHER;
+                    return SymbolNameType.ATTRSET;
             }
         }
 

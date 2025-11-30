@@ -176,18 +176,18 @@ describe "a java.util.Map instance" do
     h2.put("b", 254); h2.put("c", 300)
     test_equal({"a"=>100, "b"=>254, "c"=>300}, h1.ruby_merge(h2))
     test_equal({"a"=>100, "b"=>454, "c"=>300}, h1.ruby_merge(h2) { |k, o, n| o+n })
-    expect( h1.inspect ).to include "{\"a\"=>100, \"b\"=>200}"
+    expect( h1.inspect ).to include "{\"a\" => 100, \"b\" => 200}"
 
     h1.merge!(h2) { |k, o, n| o }
-    test_equal('#<Java::JavaUtil::LinkedHashMap: {"a"=>100, "b"=>200, "c"=>300}>', h1.inspect)
+    test_equal('#<Java::JavaUtil::LinkedHashMap: {"a" => 100, "b" => 200, "c" => 300}>', h1.inspect)
     test_equal(Java::JavaUtil::LinkedHashMap, h1.class)
 
     h.clear
     h.put(1, 100); h.put(2, 200); h.put(3, 300)
     test_equal({1=>100, 2=>200}, h.reject { |k, v| k > 2 })
-    expect( h.inspect ).to include "{1=>100, 2=>200, 3=>300}"
+    expect( h.inspect ).to include "{1 => 100, 2 => 200, 3 => 300}"
     test_equal({1=>100, 2=>200}, h.reject! { |k, v| k > 2 })
-    expect( h.inspect ).to include "{1=>100, 2=>200}"
+    expect( h.inspect ).to include "{1 => 100, 2 => 200}"
 
     test_equal({"c"=>300, "d"=>400, "e"=>500}, h.ruby_replace({"c"=>300, "d"=>400, "e"=>500}))
     test_equal(Java::JavaUtil::LinkedHashMap, h.class)
@@ -218,7 +218,7 @@ describe "a java.util.Map instance" do
 
     h2 = {"b"=>254, "c"=>300}
     test_equal({"a"=>100, "b"=>200, "c"=>300}, h.update(h2) { |k, o, n| o })
-    expect( h.inspect ).to include "{\"a\"=>100, \"b\"=>200, \"c\"=>300}"
+    expect( h.inspect ).to include "{\"a\" => 100, \"b\" => 200, \"c\" => 300}"
     test_equal(Java::JavaUtil::LinkedHashMap, h.class)
     test_equal([100, 200], h.values_at("a", "b"))
     test_equal([100, 200, nil], h.values_at("a", "b", "z"))
@@ -327,19 +327,6 @@ describe "a java.util.Map instance" do
     test_equal(20, x[:b])
 
     x.put(:a, 1); x.put(:b, 2)
-
-    # Java 8 adds a replace method to Map that takes a key and value
-    if ENV_JAVA['java.specification.version'] < '1.8'
-      x.replace(ToHashImposter.new({:a => 10, :b => 20}))
-      test_equal(10, x[:a])
-      test_equal(20, x[:b])
-      test_exception(TypeError) { x.replace(ToHashImposter.new(4)) }
-
-      x.put(:a, 1); x.put(:b, 2)
-      x.replace(ToHashImposter.new(sub2))
-      test_equal(10, x[:a])
-      test_equal(20, x[:b])
-    end
 
     class H1 < java.util.HashMap
     end

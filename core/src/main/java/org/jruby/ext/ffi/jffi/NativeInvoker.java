@@ -11,9 +11,6 @@ import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.Visibility;
 import org.jruby.runtime.builtin.IRubyObject;
 
-/**
- *
- */
 abstract public class NativeInvoker extends DynamicMethod {
     protected final Arity arity;
     protected final com.kenai.jffi.Function function;
@@ -45,7 +42,7 @@ abstract public class NativeInvoker extends DynamicMethod {
         return this;
     }
 
-    @Deprecated @Override
+    @Deprecated(since = "9.4.3.0") @Override
     public final Arity getArity() {
         return arity;
     }
@@ -71,7 +68,7 @@ abstract public class NativeInvoker extends DynamicMethod {
             return call(context, self, clazz, name, args);
 
         } else {
-            Arity.checkArgumentCount(context.runtime, name, args,
+            Arity.checkArgumentCount(context, name, args,
                     arity.getValue() - 1, arity.getValue());
 
             IRubyObject[] params = new IRubyObject[arity.getValue()];

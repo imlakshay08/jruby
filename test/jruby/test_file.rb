@@ -92,10 +92,10 @@ class TestFile < Test::Unit::TestCase
 
   # JRUBY-3849
   def test_expand_path_encoding; require 'pathname'
-    assert_equal(Encoding.find('UTF-8'), File.expand_path('/'.force_encoding('UTF-8')).encoding)
-    assert_equal(Encoding.find('US-ASCII'), File.expand_path('/'.force_encoding('US-ASCII')).encoding)
-    assert_equal(Encoding.find('UTF-8'), File.expand_path(Pathname.new('/'.force_encoding('UTF-8'))).encoding)
-    assert_equal(Encoding.find('US-ASCII'), File.expand_path(Pathname.new('/'.force_encoding('US-ASCII'))).encoding)
+    assert_equal(Encoding.find('UTF-8'), File.expand_path((+'/').force_encoding('UTF-8')).encoding)
+    assert_equal(Encoding.find('US-ASCII'), File.expand_path((+'/').force_encoding('US-ASCII')).encoding)
+    assert_equal(Encoding.find('UTF-8'), File.expand_path(Pathname.new((+'/').force_encoding('UTF-8'))).encoding)
+    assert_equal(Encoding.find('US-ASCII'), File.expand_path(Pathname.new((+'/').force_encoding('US-ASCII'))).encoding)
   end
 
   def test_expand_path_nil
@@ -697,7 +697,7 @@ class TestFile < Test::Unit::TestCase
   def test_file_exist_query
     assert(File.exist?('test'))
     assert(! File.exist?('test_not'))
-    assert(jruby("-e \"print File.exists?('test_not');print File.exists?('test')\"", 'jruby.native.enabled' => 'false' ) == 'falsetrue')
+    assert(jruby("-e \"print File.exist?('test_not');print File.exist?('test')\"", 'jruby.native.enabled' => 'false' ) == 'falsetrue')
   end
 
   def test_file_exist_in_jar_file
@@ -752,7 +752,7 @@ class TestFile < Test::Unit::TestCase
     end
     assert_equal "foobarx\n", val
 
-    values = ""
+    values = +""
     File.open("file:" + File.expand_path("test/jruby/test_jar2.jar") + "!/test_value.rb") do |f|
       f.each do |s|
         values << s
@@ -806,13 +806,13 @@ class TestFile < Test::Unit::TestCase
 
   # JRUBY-2524
   def test_filetest_exists_uri_prefixes
-    assert(!FileTest.exists?("file:/!"))
+    assert(!FileTest.exist?("file:/!"))
   end if IS_JRUBY
 
   def test_file_exists_uri_prefixes
-    assert(File.exists?("file:test/jruby/dir with spaces/test_jar.jar!/abc/foo.rb"))
-    assert(File.exists?("jar:file:test/jruby/dir with spaces/test_jar.jar!/abc/foo.rb"))
-    assert(File.exists?("jar:file:test/jruby/dir with spaces/./test_jar.jar!/abc/./foo/../foo.rb"))
+    assert(File.exist?("file:test/jruby/dir with spaces/test_jar.jar!/abc/foo.rb"))
+    assert(File.exist?("jar:file:test/jruby/dir with spaces/test_jar.jar!/abc/foo.rb"))
+    assert(File.exist?("jar:file:test/jruby/dir with spaces/./test_jar.jar!/abc/./foo/../foo.rb"))
   end if IS_JRUBY
 
   # JRUBY-2524
@@ -1118,11 +1118,11 @@ class TestFile < Test::Unit::TestCase
 
   def test_truncate_doesnt_create_file
     name = "___foo_bar___"
-    assert(!File.exists?(name))
+    assert(!File.exist?(name))
 
     assert_raises(Errno::ENOENT) { File.truncate(name, 100) }
 
-    assert(!File.exists?(name))
+    assert(!File.exist?(name))
   end
 
   # JRUBY-2340

@@ -37,11 +37,14 @@ import org.jruby.internal.runtime.methods.ProcMethod;
 import org.jruby.runtime.Arity;
 import org.jruby.runtime.Block;
 import org.jruby.runtime.ClassIndex;
-import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.runtime.callsite.CacheEntry;
 
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Define.defineClass;
+import static org.jruby.runtime.ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR;
 import static org.jruby.util.RubyStringBuilder.str;
 
 /**
@@ -75,25 +78,18 @@ public class RubyUnboundMethod extends AbstractRubyMethod {
         return newMethod;
     }
 
-    public static RubyClass defineUnboundMethodClass(Ruby runtime) {
-        RubyClass newClass = 
-        	runtime.defineClass("UnboundMethod", runtime.getObject(), ObjectAllocator.NOT_ALLOCATABLE_ALLOCATOR);
-
-        newClass.setClassIndex(ClassIndex.UNBOUNDMETHOD);
-        newClass.setReifiedClass(RubyUnboundMethod.class);
-
-        newClass.defineAnnotatedMethods(AbstractRubyMethod.class);
-        newClass.defineAnnotatedMethods(RubyUnboundMethod.class);
-
-        newClass.getSingletonClass().undefineMethod("new");
-
-        return newClass;
+    public static RubyClass defineUnboundMethodClass(ThreadContext context, RubyClass Object) {
+        return defineClass(context, "UnboundMethod", Object, NOT_ALLOCATABLE_ALLOCATOR).
+                reifiedClass(RubyUnboundMethod.class).
+                classIndex(ClassIndex.UNBOUNDMETHOD).
+                defineMethods(context, AbstractRubyMethod.class, RubyUnboundMethod.class).
+                tap(c -> c.singletonClass(context).undefMethods(context, "new"));
     }
 
     @Override
     @JRubyMethod(name = "==")
     public RubyBoolean op_equal(ThreadContext context, IRubyObject other) {
-        return RubyBoolean.newBoolean(context,  equals(other) );
+        return asBoolean(context,  equals(other) );
     }
 
     @Override
@@ -102,14 +98,14 @@ public class RubyUnboundMethod extends AbstractRubyMethod {
         if (method instanceof ProcMethod) {
             return ((ProcMethod) method).isSame(((AbstractRubyMethod) other).getMethod());
         }
+
         AbstractRubyMethod otherMethod = (AbstractRubyMethod) other;
-        return originModule == otherMethod.originModule &&
-               method.getRealMethod().getSerialNumber() == otherMethod.method.getRealMethod().getSerialNumber();
+        return method.getRealMethod().getSerialNumber() == otherMethod.method.getRealMethod().getSerialNumber();
     }
 
     @JRubyMethod
     public RubyFixnum hash(ThreadContext context) {
-        return context.runtime.newFixnum(hashCode());
+        return asFixnum(context, hashCode());
     }
 
     @Override
@@ -147,11 +143,18 @@ public class RubyUnboundMethod extends AbstractRubyMethod {
     }
 
     @JRubyMethod(name = "clone")
-    @Override
     public RubyUnboundMethod rbClone() {
         RubyUnboundMethod unboundMethod = newUnboundMethod(implementationModule, methodName, originModule, originName, entry);
-        if (isFrozen()) unboundMethod.setFrozen(true);
-        return unboundMethod;
+        ThreadContext context = getRuntime().getCurrentContext();
+
+        return (RubyUnboundMethod) cloneSetup(context, unboundMethod, context.nil);
+    }
+
+    @JRubyMethod
+    public RubyUnboundMethod dup(ThreadContext context) {
+        RubyUnboundMethod unboundMethod = newUnboundMethod(implementationModule, methodName, originModule, originName, entry);
+
+        return (RubyUnboundMethod) dupSetup(context, unboundMethod);
     }
 
     @JRubyMethod(required =  1, rest = true, checkArity = false, keywords = true)
@@ -173,36 +176,8 @@ public class RubyUnboundMethod extends AbstractRubyMethod {
 
     @JRubyMethod(name = {"inspect", "to_s"})
     @Override
-    public IRubyObject inspect() {
-        StringBuilder str = new StringBuilder(24).append("#<");
-        char sharp = '#';
-
-        str.append(getMetaClass().getRealClass().getName()).append(": ");
-
-        if (implementationModule.isSingleton()) {
-            str.append(implementationModule.inspect().toString());
-        } else {
-            str.append(originModule.getName());
-
-            if (implementationModule != originModule) {
-                str.append('(').append(implementationModule.getName()).append(')');
-            }
-        }
-
-        str.append(sharp).append(methodName); // (real-name) if alias
-        final String realName= method.getRealMethod().getName();
-        if ( realName != null && ! methodName.equals(realName) ) {
-            str.append('(').append(realName).append(')');
-        }
-        str.append('(').append(')');
-        String filename = getFilename();
-        if (filename != null) {
-            str.append(' ').append(getFilename()).append(':').append(getLine());
-        }
-        str.append('>');
-
-        RubyString res = RubyString.newString(getRuntime(), str);
-        return res;
+    public IRubyObject inspect(ThreadContext context) {
+        return inspect((IRubyObject) null);
     }
 
     @JRubyMethod
@@ -212,9 +187,7 @@ public class RubyUnboundMethod extends AbstractRubyMethod {
             RubyModule definedClass = method.getRealMethod().getDefinedClass();
             RubyModule module = sourceModule.findImplementer(definedClass);
 
-            if (module != null) {
-                superClass = module.getSuperClass();
-            }
+            if (module != null) superClass = module.getSuperClass();
         } else {
             superClass = sourceModule.getSuperClass();
         }

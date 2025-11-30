@@ -9,7 +9,6 @@ import org.jruby.RubyModule;
 import org.jruby.compiler.impl.SkinnyMethodAdapter;
 import org.jruby.ir.instructions.ClosureAcceptingInstr;
 import org.jruby.ir.operands.NullBlock;
-import org.jruby.ir.operands.Operand;
 import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.ir.targets.indy.IndyArgumentsCompiler;
 import org.jruby.ir.targets.indy.IndyBlockCompiler;
@@ -36,12 +35,11 @@ import org.jruby.ir.targets.simple.NormalLocalVariableCompiler;
 import org.jruby.ir.targets.simple.NormalValueCompiler;
 import org.jruby.ir.targets.simple.NormalYieldCompiler;
 import org.jruby.parser.StaticScope;
-import org.jruby.runtime.Binding;
 import org.jruby.runtime.Block;
-import org.jruby.runtime.Frame;
 import org.jruby.runtime.Helpers;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.JavaNameMangler;
+import org.jruby.util.cli.Options;
 import org.jruby.util.collections.IntHashMap;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
@@ -55,10 +53,6 @@ import java.util.Map;
 
 import static org.jruby.util.CodegenUtils.*;
 
-/**
- *
- * @author headius
- */
 public class IRBytecodeAdapter {
     public static final int MAX_ARGUMENTS = 250;
 
@@ -259,11 +253,13 @@ public class IRBytecodeAdapter {
     public void endMethod() {
         adapter.end(() -> variableTypes.forEach((i, type) -> {
             String name = variableNames.get(i);
-            Label varStart = varStarts.get(i);
-            if (varStart == null) {
-                adapter.local(i, name, type);
-            } else {
-                adapter.local(i, name, type, varStart);
+            if (!name.startsWith("$") || Options.JIT_DEBUG.load()) {
+                Label varStart = varStarts.get(i);
+                if (varStart == null) {
+                    adapter.local(i, name, type);
+                } else {
+                    adapter.local(i, name, type, varStart);
+                }
             }
         }));
     }
@@ -320,10 +316,21 @@ public class IRBytecodeAdapter {
         if (superNameOffset == -1) {
             // load from self block
             loadSelfBlock();
-            adapter.invokevirtual(p(Block.class), "getBinding", sig(Binding.class));
-            adapter.invokevirtual(p(Binding.class), "getMethod", sig(String.class));
+            adapter.invokestatic(p(IRRuntimeHelpers.class), "getFrameNameFromBlock", sig(String.class, Block.class));
         } else {
             adapter.aload(superNameOffset);
+        }
+    }
+
+    public void loadFrameBlock() {
+        int superNameOffset = signature.argOffset(JVMVisitor.SUPER_NAME_NAME);
+
+        if (superNameOffset == -1) {
+            // load from self block
+            loadSelfBlock();
+            adapter.invokestatic(p(IRRuntimeHelpers.class), "getFrameBlockFromBlock", sig(Block.class, Block.class));
+        } else {
+            loadBlock();
         }
     }
 

@@ -14,6 +14,13 @@ class TestRipper::Ripper < Test::Unit::TestCase
     @ripper = Ripper.new '1 + 1'
   end
 
+  def test_new
+    assert_separately(%w[-rripper], "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      assert_nil EnvUtil.under_gc_stress {Ripper.new("")}.state
+    end;
+  end
+
   def test_column
     assert_nil @ripper.column
   end
@@ -81,7 +88,7 @@ class TestRipper::Ripper < Test::Unit::TestCase
     ripper.yydebug = true
     ripper.debug_output = out
     ripper.parse
-    assert_include out.string[/.*"literal content".*/], 'woot'
+    assert_include out.string[/.*"literal content".*/], '1.1-1.5'
   end
 
   def test_regexp_with_option
@@ -141,6 +148,55 @@ end
     assert_nothing_raised { Ripper.lex src }
   end
 
+  def test_assignable_in_regexp
+    assert_separately(%w(-rripper), "", "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      assert_nil(Ripper.parse('/(?<_1>)/ =~ s'))
+    end;
+  end
+
+  def test_invalid_multibyte_character_in_regexp
+    lex = Ripper.lex(%q[/#{"\xcd"}/])
+    assert_equal([[1, 0], :on_regexp_beg, "/", state(:EXPR_BEG)], lex.shift)
+    assert_equal([[1, 1], :on_embexpr_beg, "\#{", state(:EXPR_BEG)], lex.shift)
+    assert_equal([[1, 3], :on_tstring_beg, "\"", state(:EXPR_BEG)], lex.shift)
+    assert_equal([[1, 4], :on_tstring_content, "\\xcd", state(:EXPR_BEG)], lex.shift)
+    assert_equal([[1, 8], :on_tstring_end, "\"", state(:EXPR_END)], lex.shift)
+    assert_equal([[1, 9], :on_embexpr_end, "}", state(:EXPR_END)], lex.shift)
+    assert_equal([[1, 10], :on_regexp_end, "/", state(:EXPR_BEG)], lex.shift)
+    assert_empty(lex)
+  end
+
+  def test_no_memory_leak
+    assert_no_memory_leak(%w(-rripper), "", "#{<<~'end;'}", rss: true)
+      2_000_000.times do
+        Ripper.parse("")
+      end
+    end;
+
+    # [Bug #19835]
+    assert_no_memory_leak(%w(-rripper), "", "#{<<~'end;'}", rss: true)
+      1_000_000.times do
+        Ripper.parse("class Foo")
+      end
+    end;
+
+    # [Bug #19836]
+    assert_no_memory_leak(%w(-rripper), "", "#{<<~'end;'}", rss: true)
+      1_000_000.times do
+        Ripper.parse("-> {")
+      end
+    end;
+  end
+
+  def test_sexp_no_memory_leak
+    assert_no_memory_leak(%w(-rripper), "", "#{<<~'end;'}", rss: true)
+      1_000_000.times do
+        Ripper.sexp("")
+      end
+    end;
+  end
+
   class TestInput < self
     Input = Struct.new(:lines) do
       def gets
@@ -158,4 +214,7 @@ end
     end
   end
 
+  def state(name)
+    Ripper::Lexer::State.new(Ripper.const_get(name))
+  end
 end if ripper_test

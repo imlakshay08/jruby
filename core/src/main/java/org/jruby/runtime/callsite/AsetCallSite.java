@@ -5,6 +5,7 @@ import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
 import static org.jruby.RubyBasicObject.getMetaClass;
+import static org.jruby.api.Access.arrayClass;
 
 public class AsetCallSite extends MonomorphicCallSite {
     public AsetCallSite() {
@@ -13,9 +14,7 @@ public class AsetCallSite extends MonomorphicCallSite {
 
     @Override
     public IRubyObject call(ThreadContext context, IRubyObject caller, IRubyObject self, IRubyObject arg0, IRubyObject arg1) {
-        if (getMetaClass(self) == context.runtime.getArray()) {
-            return ((RubyArray) self).aset(arg0, arg1);
-        }
-        return super.call(context, caller, self, arg0, arg1);
+        return getMetaClass(self) == arrayClass(context) ?
+                ((RubyArray) self).aset(context, arg0, arg1) : super.call(context, caller, self, arg0, arg1);
     }
 }

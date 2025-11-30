@@ -31,6 +31,7 @@ package org.jruby.javasupport.ext;
 import org.jruby.*;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.anno.JRubyModule;
+import org.jruby.api.Create;
 import org.jruby.internal.runtime.methods.JavaMethod;
 import org.jruby.java.proxies.JavaProxy;
 import org.jruby.javasupport.Java;
@@ -45,6 +46,10 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 
 import static org.jruby.RubyEnumerator.enumeratorize;
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.toInt;
+import static org.jruby.api.Create.*;
 import static org.jruby.javasupport.JavaUtil.convertJavaArrayToRuby;
 import static org.jruby.javasupport.JavaUtil.convertJavaToUsableRubyObject;
 import static org.jruby.javasupport.JavaUtil.inspectObject;
@@ -62,26 +67,28 @@ import static org.jruby.util.Inspector.*;
  */
 public abstract class JavaUtil {
 
-    public static void define(final Ruby runtime) {
-        JavaExtensions.put(runtime, java.util.Enumeration.class, (proxyClass) -> Enumeration.define(runtime, proxyClass));
-        JavaExtensions.put(runtime, java.util.Iterator.class, (proxyClass) -> Iterator.define(runtime, proxyClass));
-        JavaExtensions.put(runtime, java.util.Collection.class, (proxyClass) -> Collection.define(runtime, proxyClass));
-        JavaExtensions.put(runtime, java.util.List.class, (proxyClass) -> List.define(runtime, proxyClass));
+    public static void define(ThreadContext context, RubyModule Enumerable) {
+        var runtime = context.runtime;
+
+        JavaExtensions.put(runtime, java.util.Enumeration.class, proxy -> Enumeration.define(context, proxy, Enumerable));
+        JavaExtensions.put(runtime, java.util.Iterator.class, proxy -> Iterator.define(context, proxy, Enumerable));
+        JavaExtensions.put(runtime, java.util.Collection.class, proxy -> Collection.define(context, proxy, Enumerable));
+        JavaExtensions.put(runtime, java.util.List.class, proxy -> proxy.defineMethods(context, List.class));
         JavaExtensions.put(runtime, java.util.Date.class, (dateClass) -> {
-            dateClass.addMethod("inspect", new JavaLang.InspectValueWithTypePrefix(dateClass));
+            dateClass.addMethod(context, "inspect", new JavaLang.InspectValueWithTypePrefix(dateClass));
         });
-        JavaExtensions.put(runtime, java.util.TimeZone.class, (proxyClass) -> {
-            proxyClass.addMethod("inspect", new InspectTimeZone(proxyClass));
+        JavaExtensions.put(runtime, java.util.TimeZone.class, proxy -> {
+            proxy.addMethod(context, "inspect", new InspectTimeZone(proxy));
         });
     }
 
     @JRubyModule(name = "Java::JavaUtil::Enumeration", include = "Enumerable")
     public static class Enumeration {
 
-        static RubyModule define(final Ruby runtime, final RubyModule proxy) {
-            proxy.includeModule( runtime.getEnumerable() ); // include Enumerable
-            proxy.defineAnnotatedMethods(Enumeration.class);
-            return proxy;
+        static RubyModule define(ThreadContext context, final RubyModule proxy, RubyModule Enumerable) {
+            return proxy.
+                    include(context, Enumerable).
+                    defineMethods(context, Enumeration.class);
         }
 
         @JRubyMethod
@@ -100,10 +107,10 @@ public abstract class JavaUtil {
     @JRubyModule(name = "Java::JavaUtil::Iterator", include = "Enumerable")
     public static class Iterator {
 
-        static RubyModule define(final Ruby runtime, final RubyModule proxy) {
-            proxy.includeModule( runtime.getEnumerable() ); // include Enumerable
-            proxy.defineAnnotatedMethods(Iterator.class);
-            return proxy;
+        static RubyModule define(ThreadContext context, final RubyModule proxy, RubyModule Enumerable) {
+            return proxy.
+                    include(context, Enumerable).
+                    defineMethods(context, Iterator.class);
         }
 
         @JRubyMethod
@@ -122,15 +129,15 @@ public abstract class JavaUtil {
     @JRubyModule(name = "Java::JavaUtil::Collection", include = "Enumerable")
     public static class Collection {
 
-        static RubyModule define(final Ruby runtime, final RubyModule proxy) {
-            proxy.includeModule( runtime.getEnumerable() ); // include Enumerable
-            proxy.defineAnnotatedMethods(Collection.class);
-            return proxy;
+        static RubyModule define(ThreadContext context, final RubyModule proxy, RubyModule Enumerable) {
+            return proxy.
+                    include(context, Enumerable).
+                    defineMethods(context, Collection.class);
         }
 
         @JRubyMethod(name = { "length", "size" })
         public static RubyNumeric length(final ThreadContext context, final IRubyObject self) {
-            return RubyFixnum.int2fix(context.runtime, ((java.util.Collection) unwrapIfJavaObject(self)).size());
+            return asFixnum(context, ((java.util.Collection) unwrapIfJavaObject(self)).size());
         }
 
         @JRubyMethod
@@ -146,7 +153,7 @@ public abstract class JavaUtil {
         @JRubyMethod(name = { "include?", "member?" }) // @override Enumerable#include?
         public static RubyBoolean include_p(final ThreadContext context, final IRubyObject self, final IRubyObject obj) {
             final java.util.Collection coll = unwrapIfJavaObject(self);
-            return RubyBoolean.newBoolean(context,  coll.contains( obj.toJava(java.lang.Object.class) ) );
+            return asBoolean(context, coll.contains(obj.toJava(java.lang.Object.class)));
         }
 
         // NOTE: first might conflict with some Java types (e.g. java.util.Deque) thus providing a ruby_ alias
@@ -158,16 +165,15 @@ public abstract class JavaUtil {
 
         @JRubyMethod(name = { "first", "ruby_first" }) // re-def Enumerable#first(n)
         public static IRubyObject first(final ThreadContext context, final IRubyObject self, final IRubyObject count) {
-            final java.util.Collection coll = unwrapIfJavaObject(self);
-            int len = count.convertToInteger().getIntValue();
+            final java.util.Collection<?> coll = unwrapIfJavaObject(self);
+            int len = toInt(context, count);
             int size = coll.size(); if ( len > size ) len = size;
-            final Ruby runtime = context.runtime;
-            if ( len == 0 ) return RubyArray.newEmptyArray(runtime);
-            final RubyArray arr = RubyArray.newArray(runtime, len);
-            int i = 0; for ( java.util.Iterator it = coll.iterator(); i < len; i++ ) {
-                arr.append( convertJavaToUsableRubyObject(runtime, it.next() ) );
+            if ( len == 0 ) return RubyArray.newEmptyArray(context.runtime);
+            var objArray = new IRubyObject[len];
+            int i = 0; for ( java.util.Iterator<?> it = coll.iterator(); i < len; i++ ) {
+                objArray[i] = convertJavaToUsableRubyObject(context.runtime, it.next());
             }
-            return arr;
+            return Create.newArrayNoCopy(context, objArray);
         }
 
         @JRubyMethod(name = { "<<" })
@@ -302,20 +308,14 @@ public abstract class JavaUtil {
 
     @JRubyModule(name = "Java::JavaUtil::List")
     public static class List {
-
-        static RubyModule define(final Ruby runtime, final RubyModule proxy) {
-            proxy.defineAnnotatedMethods(List.class);
-            return proxy;
-        }
-
         @JRubyMethod(name = "[]") // act safe on indexes compared to get(idx) throwing IndexOutOfBoundsException
         public static IRubyObject aref(final ThreadContext context, final IRubyObject self, final IRubyObject idx) {
             final java.util.List list = unwrapIfJavaObject(self);
             final int size = list.size();
 
             if ( idx instanceof RubyRange ) {
-                int first = idx.callMethod(context, "first").convertToInteger().getIntValue();
-                int last = idx.callMethod(context, "last").convertToInteger().getIntValue();
+                int first = toInt(context, idx.callMethod(context, "first"));
+                int last = toInt(context, idx.callMethod(context, "last"));
                 if ( last < 0 ) last += size;
                 if ( first < 0 ) first += size;
                 if ( first < 0 || first >= size ) return context.nil;
@@ -325,7 +325,7 @@ public abstract class JavaUtil {
                 return Java.getInstance(context.runtime, list.subList(first, last));
             }
 
-            int i = idx.convertToInteger().getIntValue();
+            int i = toInt(context, idx);
             if ( i < 0 ) i = size + i; // -1 ... size - 1
             if ( i >= size || i < 0 ) return context.nil;
             return convertJavaToUsableRubyObject(context.runtime, list.get(i));
@@ -339,12 +339,12 @@ public abstract class JavaUtil {
 
             final java.util.List list = unwrapIfJavaObject(self);
 
-            int i = idx.convertToInteger().getIntValue();
+            int i = toInt(context, idx.convertToInteger());
             final int size = list.size();
             if ( i < 0 ) i = size + i; // -1 ... size - 1
             if ( i >= size || i < 0 ) return context.nil;
 
-            int last = len.convertToInteger().getIntValue();
+            int last = toInt(context, len);
             if ( last < 0 ) return context.nil;
             last += i; if ( last > size ) last = size;
 
@@ -359,8 +359,8 @@ public abstract class JavaUtil {
             final int size = list.size();
 
             if ( idx instanceof RubyRange ) {
-                int first = idx.callMethod(context, "first").convertToInteger().getIntValue();
-                int last = idx.callMethod(context, "last").convertToInteger().getIntValue();
+                int first = toInt(context, idx.callMethod(context, "first"));
+                int last = toInt(context, idx.callMethod(context, "last"));
                 if ( last < 0 ) last += size;
                 if ( first < 0 ) first += size;
                 if ( ((RubyRange) idx).isExcludeEnd() ) last--;
@@ -372,7 +372,7 @@ public abstract class JavaUtil {
                 return val;
             }
 
-            int i = idx.convertToInteger().getIntValue();
+            int i = toInt(context, idx);
             if ( i < 0 ) i = size + i; // -1 ... size - 1
             if ( i >= size ) {
                 for ( int t = 0; t < i - size; t++ ) list.add(null);
@@ -394,7 +394,7 @@ public abstract class JavaUtil {
         @JRubyMethod(name = { "first", "ruby_first" }) // #first ext like with array: [1, 2, 3].first(2) == [1, 2]
         public static IRubyObject first(final ThreadContext context, final IRubyObject self, final IRubyObject count) {
             final java.util.List list = unwrapIfJavaObject(self);
-            int len = count.convertToInteger().getIntValue();
+            int len = toInt(context, count);
             int size = list.size(); if ( len > size ) len = size;
             return Java.getInstance(context.runtime, list.subList(0, len));
         }
@@ -409,7 +409,7 @@ public abstract class JavaUtil {
         @JRubyMethod(name = { "last", "ruby_last" }) // #last ext like with array: [1, 2, 3].last(2) == [2, 3]
         public static IRubyObject last(final ThreadContext context, final IRubyObject self, final IRubyObject count) {
             final java.util.List list = unwrapIfJavaObject(self);
-            int len = count.convertToInteger().getIntValue();
+            int len = toInt(context, count);
             int size = list.size();
             int start = size - len; if ( start < 0 ) start = 0;
             int end = start + len; if ( end > size ) end = size;
@@ -418,7 +418,6 @@ public abstract class JavaUtil {
 
         @JRubyMethod(name = "index") // list.index { |val| val > 0 }
         public static IRubyObject index(final ThreadContext context, final IRubyObject self, final Block block) {
-            final Ruby runtime = context.runtime;
             if ( ! block.isGiven() ) { // list.index ... Enumerator.new(self, :index)
                 return enumeratorize(context.runtime, self, "index");
             }
@@ -426,15 +425,15 @@ public abstract class JavaUtil {
             final java.util.List list = unwrapIfJavaObject(self);
             if ( list instanceof java.util.RandomAccess ) {
                 for ( int i = 0; i < list.size(); i++ ) {
-                    IRubyObject ret = block.yield(context, convertJavaToUsableRubyObject(runtime, list.get(i)));
-                    if ( ret.isTrue() ) return runtime.newFixnum(i);
+                    IRubyObject ret = block.yield(context, convertJavaToUsableRubyObject(context.runtime, list.get(i)));
+                    if ( ret.isTrue() ) return asFixnum(context, i);
                 }
             }
             else {
                 int i = 0;
                 for ( Object elem : list ) {
-                    IRubyObject ret = block.yield(context, convertJavaToUsableRubyObject(runtime, elem));
-                    if ( ret.isTrue() ) return runtime.newFixnum(i);
+                    IRubyObject ret = block.yield(context, convertJavaToUsableRubyObject(context.runtime, elem));
+                    if ( ret.isTrue() ) return asFixnum(context, i);
                     i++;
                 }
             }
@@ -445,14 +444,13 @@ public abstract class JavaUtil {
         public static IRubyObject index(final ThreadContext context, final IRubyObject self, final IRubyObject val,
             final Block ignoredBlock) {
 
-            final Ruby runtime = context.runtime;
             final java.util.List list = unwrapIfJavaObject(self);
             if ( list instanceof java.util.RandomAccess ) {
                 for ( int i = 0; i < list.size(); i++ ) {
                     final Object elem = list.get(i);
                     if ( val == elem ||
-                        invokedynamic(context, val, OP_EQUAL, convertJavaToUsableRubyObject(runtime, elem)).isTrue() ) {
-                        return runtime.newFixnum(i);
+                        invokedynamic(context, val, OP_EQUAL, convertJavaToUsableRubyObject(context.runtime, elem)).isTrue() ) {
+                        return asFixnum(context, i);
                     }
                 }
             }
@@ -460,8 +458,8 @@ public abstract class JavaUtil {
                 int i = 0;
                 for ( Object elem : list ) {
                     if ( val == elem ||
-                        invokedynamic(context, val, OP_EQUAL, convertJavaToUsableRubyObject(runtime, elem)).isTrue() ) {
-                        return runtime.newFixnum(i);
+                        invokedynamic(context, val, OP_EQUAL, convertJavaToUsableRubyObject(context.runtime, elem)).isTrue() ) {
+                        return asFixnum(context, i);
                     }
                     i++;
                 }
@@ -480,7 +478,7 @@ public abstract class JavaUtil {
             if ( list instanceof java.util.RandomAccess ) {
                 for ( int i = list.size() - 1; i >= 0; i-- ) {
                     IRubyObject ret = block.yield(context, convertJavaToUsableRubyObject(runtime, list.get(i)));
-                    if ( ret.isTrue() ) return runtime.newFixnum(i);
+                    if ( ret.isTrue() ) return asFixnum(context, i);
                 }
             }
             else {
@@ -488,7 +486,7 @@ public abstract class JavaUtil {
                 for ( java.util.ListIterator it = list.listIterator(i); it.hasPrevious(); ) {
                     final Object elem = it.previous();
                     IRubyObject ret = block.yield(context, convertJavaToUsableRubyObject(runtime, elem));
-                    if ( ret.isTrue() ) return runtime.newFixnum(i);
+                    if ( ret.isTrue() ) return asFixnum(context, i);
                     i--;
                 }
             }
@@ -506,7 +504,7 @@ public abstract class JavaUtil {
                     final Object elem = list.get(i);
                     if ( val == elem ||
                         invokedynamic(context, val, OP_EQUAL, convertJavaToUsableRubyObject(runtime, elem)).isTrue() ) {
-                        return runtime.newFixnum(i);
+                        return asFixnum(context, i);
                     }
                 }
             }
@@ -516,7 +514,7 @@ public abstract class JavaUtil {
                     final Object elem = it.previous();
                     if ( val == elem ||
                         invokedynamic(context, val, OP_EQUAL, convertJavaToUsableRubyObject(runtime, elem)).isTrue() ) {
-                        return runtime.newFixnum(i);
+                        return asFixnum(context, i);
                     }
                     i--;
                 }
@@ -583,7 +581,7 @@ public abstract class JavaUtil {
                 if ( o2 instanceof IRubyObject ) r2 = (IRubyObject) o2;
                 else r2 = convertJavaToUsableRubyObject(context.runtime, o2);
 
-                return RubyInteger.fix2int( compare(context, r1, r2) );
+                return toInt(context, compare(context, r1, r2));
             }
 
             // @JRubyMethod
@@ -617,7 +615,7 @@ public abstract class JavaUtil {
                 if ( o2 instanceof IRubyObject ) r2 = (IRubyObject) o2;
                 else r2 = convertJavaToUsableRubyObject(context.runtime, o2);
 
-                return RubyInteger.fix2int( compare(context, r1, r2) );
+                return toInt(context, compare(context, r1, r2));
             }
 
             // @JRubyMethod
@@ -641,7 +639,7 @@ public abstract class JavaUtil {
             // NOTE: might need work but showing type here is a bit confusing as
             // java.util.TimeZone's impl type is Java::SunUtilCalendar::ZoneInfo
             java.util.TimeZone tz = unwrapIfJavaObject(self);
-            return RubyString.newString(context.runtime, tz.getID());
+            return newString(context, tz.getID());
             // also the toString format is very verbose to use:
             // sun.util.calendar.ZoneInfo[id=\"Europe/Prague\",offset=3600000,dstSavings=3600000,useDaylight=true,transitions=141,lastRule=java.util.SimpleTimeZone[...]]
         }

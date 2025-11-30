@@ -5,20 +5,14 @@
 package org.jruby.ir.targets;
 
 import com.headius.invokebinder.Signature;
-import org.jruby.compiler.impl.SkinnyMethodAdapter;
 import org.jruby.ir.IRScope;
 import org.jruby.ir.operands.Label;
 import org.jruby.ir.operands.Variable;
-import org.jruby.runtime.DynamicScope;
 import org.objectweb.asm.Type;
 
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- *
- * @author headius
- */
 public class MethodData {
 
     public MethodData(IRBytecodeAdapter method, IRScope scope, String scopeField, Signature signature, int specificArity) {
@@ -30,7 +24,13 @@ public class MethodData {
 
         // incoming arguments
         for (int i = 0; i < signature.argCount(); i++) {
-            local("$" + signature.argName(i), Type.getType(signature.argType(i)));
+            String argName = signature.argName(i);
+            argName = switch (argName) {
+                case "self" -> "self";
+                case "blockArg" -> JVMVisitor.BLOCK_ARG_LOCAL_NAME;
+                default -> "$" + argName;
+            };
+            local(argName, Type.getType(signature.argType(i)));
         }
     }
 

@@ -38,7 +38,8 @@ import org.jruby.ast.*;
  * Visitor interface to be implemented by visitors of the jRuby AST.
  * each node will call the visit method appropriate to its type.
  * @see org.jruby.ast.Node
-  *
+ *
+ * @param <T> the return value of visit
  * @author Benoit Cerrina
  **/
 public interface NodeVisitor<T> {
@@ -80,6 +81,7 @@ public interface NodeVisitor<T> {
     T visitDotNode(DotNode iVisited);
     T visitEncodingNode(EncodingNode iVisited);
     T visitEnsureNode(EnsureNode iVisited);
+    T visitErrorNode(ErrorNode iVisited);
     T visitEvStrNode(EvStrNode iVisited);
     T visitFCallNode(FCallNode iVisited);
     T visitFalseNode(FalseNode iVisited);
@@ -156,6 +158,6 @@ public interface NodeVisitor<T> {
     T visitZSuperNode(ZSuperNode iVisited);
     T visitOther(Node iVisited);
 
-    @Deprecated
+    @Deprecated(since = "9.2.0.0")
     default T visitClassVarDeclNode(ClassVarDeclNode iVisited) { return null; }
 }

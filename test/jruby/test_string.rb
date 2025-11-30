@@ -42,10 +42,10 @@ class TestString < Test::Unit::TestCase
   end
 
   def test_scan_string_pattern_match
-    str = 'it_aj-ty_i-ty_it'
+    str = +'it_aj-ty_i-ty_it'
     str.sub!(/hello/, '')
     str.gsub!(/\-|_/, '-')
-    assert_equal ['-ty-', '-ty-'], str.scan(pat = '-ty-')
+    assert_equal ['-ty-', '-ty-'], str.scan(pat = +'-ty-')
     pat[2] = 'i'
     $~.inspect # failed with a NPE or might have recycled previous $~ pattern
     assert_equal /\-ty\-/, $~.regexp
@@ -55,14 +55,14 @@ class TestString < Test::Unit::TestCase
   end
 
   def test_regexp_match
-    ''.sub!(/foo/, '')
+    (+'').sub!(/foo/, '')
     # assert ! $~.nil?
     /bar/.match(nil)
     assert $~.nil?
   end
 
   def test_regexp_source_string
-    regexp = Regexp.new(str = 'StrinG')
+    regexp = Regexp.new(str = +'StrinG')
     assert regexp.eql?(/StrinG/)
     str[0] = 's'
     assert_equal 'StrinG', regexp.source
@@ -256,7 +256,6 @@ class TestStringPrintf < Test::Unit::TestCase
     assert_equal("    A", "%05c" % 65)
     assert_equal("A    ", "%-5c" % 65)
     assert_equal("A", "%c" % 65.8)
-    assert_raises(ArgumentError) {"%c" % "65"} # <%c requires a character>
     assert_raises(TypeError) {"%c" % true}
     assert_raises(TypeError) {"%c" % nil}
     assert_raises(TypeError) {"%c" % [[1, 2]]}

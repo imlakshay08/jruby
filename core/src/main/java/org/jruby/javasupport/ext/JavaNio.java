@@ -39,6 +39,7 @@ import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.RubyStringBuilder;
 
+import static org.jruby.api.Convert.asFixnum;
 import static org.jruby.javasupport.JavaUtil.unwrapIfJavaObject;
 import static org.jruby.runtime.Visibility.PUBLIC;
 import static org.jruby.util.Inspector.GT;
@@ -52,25 +53,25 @@ import static org.jruby.util.Inspector.inspectPrefix;
  */
 public abstract class JavaNio {
 
-    public static void define(final Ruby runtime) {
-        JavaExtensions.put(runtime, java.nio.Buffer.class, (proxy) -> Buffer.define(runtime, (RubyClass) proxy));
+    public static void define(ThreadContext context) {
+        var runtime = context.runtime;
+        JavaExtensions.put(runtime, java.nio.Buffer.class, (proxy) -> Buffer.define(context, (RubyClass) proxy));
         // make sure it does not use CharSequence#inspect but rather a unified Buffer#inspect format:
-        JavaExtensions.put(runtime, java.nio.CharBuffer.class, (proxy) -> proxy.addMethod("inspect", new InspectBuffer(proxy)));
+        JavaExtensions.put(runtime, java.nio.CharBuffer.class, (proxy) -> proxy.addMethod(context, "inspect", new InspectBuffer(proxy)));
     }
 
     @JRubyModule(name = "Java::JavaNio::Buffer")
     public static class Buffer {
-
-        static RubyModule define(final Ruby runtime, final RubyClass proxy) {
-            proxy.defineAnnotatedMethods(Buffer.class);
-            proxy.addMethod("inspect", new InspectBuffer(proxy));
+        static RubyModule define(ThreadContext context, final RubyClass proxy) {
+            proxy.defineMethods(context, Buffer.class).
+                    addMethod(context, "inspect", new InspectBuffer(proxy));
             return proxy;
         }
 
         @JRubyMethod(name = {"length", "size"})
         public static IRubyObject length(final ThreadContext context, final IRubyObject self) {
             java.nio.Buffer obj = self.toJava(java.nio.Buffer.class);
-            return context.runtime.newFixnum(obj.remaining()); // limit - position
+            return asFixnum(context, obj.remaining()); // limit - position
         }
 
     }

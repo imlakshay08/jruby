@@ -4,6 +4,7 @@ import org.jruby.RubyBoolean;
 import org.jruby.RubyFixnum;
 import org.jruby.RubyFloat;
 import org.jruby.RubyModule;
+import org.jruby.RubyNumeric;
 import org.jruby.exceptions.Unrescuable;
 import org.jruby.ir.Operation;
 import org.jruby.ir.instructions.ArgReceiver;
@@ -11,6 +12,7 @@ import org.jruby.ir.instructions.BreakInstr;
 import org.jruby.ir.instructions.CheckArityInstr;
 import org.jruby.ir.instructions.CheckForLJEInstr;
 import org.jruby.ir.instructions.CopyInstr;
+import org.jruby.ir.instructions.FrameNameCallInstr;
 import org.jruby.ir.instructions.Instr;
 import org.jruby.ir.instructions.JumpInstr;
 import org.jruby.ir.instructions.LineNumberInstr;
@@ -63,6 +65,10 @@ import org.jruby.runtime.Helpers;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.Visibility;
 import org.jruby.runtime.builtin.IRubyObject;
+
+import static org.jruby.api.Convert.asBoolean;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Error.runtimeError;
 
 /**
  * Base full interpreter.  Subclasses can use utility methods here and override what they want.  This method requires
@@ -150,7 +156,7 @@ public class InterpreterEngine {
                         break;
                     case CALL_OP:
                         if (profile) Profiler.updateCallSite(instr, interpreterContext.getScope(), scopeVersion);
-                        processCall(context, instr, operation, currDynScope, currScope, temp, self);
+                        processCall(context, instr, operation, currDynScope, currScope, temp, self, name);
                         break;
                     case RET_OP:
                         return processReturnOp(context, block, instr, operation, currDynScope, temp, self, currScope);
@@ -215,7 +221,7 @@ public class InterpreterEngine {
         }
 
         // Control should never get here!
-        throw context.runtime.newRuntimeError("BUG: interpreter fell through to end unexpectedly");
+        throw runtimeError(context, "BUG: interpreter fell through to end unexpectedly");
     }
 
     protected static void interpretIntOp(AluInstr instr, Operation op, long[] fixnums, boolean[] booleans) {
@@ -286,7 +292,7 @@ public class InterpreterEngine {
         }
     }
 
-    protected static void processCall(ThreadContext context, Instr instr, Operation operation, DynamicScope currDynScope, StaticScope currScope, Object[] temp, IRubyObject self) {
+    protected static void processCall(ThreadContext context, Instr instr, Operation operation, DynamicScope currDynScope, StaticScope currScope, Object[] temp, IRubyObject self, String name) {
         Object result;
 
         switch(operation) {
@@ -357,6 +363,9 @@ public class InterpreterEngine {
             }
             case NORESULT_CALL:
                 instr.interpret(context, currScope, currDynScope, self, temp);
+                break;
+            case FRAME_NAME_CALL:
+                setResult(temp, currDynScope, instr, ((FrameNameCallInstr) instr).getFrameName(context, self, name));
                 break;
             case CALL:
             default:
@@ -498,36 +507,28 @@ public class InterpreterEngine {
             }
 
             case BOX_FIXNUM: {
-                RubyFixnum f = context.runtime.newFixnum(getFixnumArg(fixnums, ((BoxFixnumInstr) instr).getValue()));
+                RubyFixnum f = asFixnum(context, getFixnumArg(fixnums, ((BoxFixnumInstr) instr).getValue()));
                 setResult(temp, currDynScope, ((BoxInstr)instr).getResult(), f);
                 break;
             }
 
             case BOX_BOOLEAN: {
-                RubyBoolean f = RubyBoolean.newBoolean(context, getBooleanArg(booleans, ((BoxBooleanInstr) instr).getValue()));
+                RubyBoolean f = asBoolean(context, getBooleanArg(booleans, ((BoxBooleanInstr) instr).getValue()));
                 setResult(temp, currDynScope, ((BoxInstr)instr).getResult(), f);
                 break;
             }
 
             case UNBOX_FLOAT: {
                 UnboxInstr ui = (UnboxInstr)instr;
-                Object val = retrieveOp(ui.getValue(), context, self, currDynScope, currScope, temp);
-                if (val instanceof RubyFloat) {
-                    floats[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFloat)val).getValue();
-                } else {
-                    floats[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFixnum)val).getDoubleValue();
-                }
+                var val = (RubyNumeric) retrieveOp(ui.getValue(), context, self, currDynScope, currScope, temp);
+                floats[((TemporaryLocalVariable)ui.getResult()).offset] = val.asDouble(context);
                 break;
             }
 
             case UNBOX_FIXNUM: {
                 UnboxInstr ui = (UnboxInstr)instr;
-                Object val = retrieveOp(ui.getValue(), context, self, currDynScope, currScope, temp);
-                if (val instanceof RubyFloat) {
-                    fixnums[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFloat)val).getLongValue();
-                } else {
-                    fixnums[((TemporaryLocalVariable)ui.getResult()).offset] = ((RubyFixnum)val).getLongValue();
-                }
+                var val = (RubyNumeric) retrieveOp(ui.getValue(), context, self, currDynScope, currScope, temp);
+                fixnums[((TemporaryLocalVariable)ui.getResult()).offset] = val.asLong(context);
                 break;
             }
 

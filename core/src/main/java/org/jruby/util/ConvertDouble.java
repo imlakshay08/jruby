@@ -33,7 +33,7 @@ public class ConvertDouble {
      * Converts supplied ByteList into a double.  strict-mode will not like
      * extra text non-numeric text or multiple sequention underscores.
      */
-    public static double byteListToDouble19(ByteList bytes, boolean strict) {
+    public static double byteListToDouble(ByteList bytes, boolean strict) {
         return new DoubleConverter().parse(bytes, strict, true);
     }
 
@@ -154,7 +154,7 @@ public class ConvertDouble {
                 addExponentToResult(adjustExponent);
             }
 
-            return SafeDoubleParser.parseDouble(new String(chars, 0, charsIndex));
+            return Double.valueOf(new String(chars, 0, charsIndex));
         }
 
         static class LightweightNumberFormatException extends NumberFormatException {

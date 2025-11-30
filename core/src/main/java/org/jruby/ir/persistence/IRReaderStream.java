@@ -41,10 +41,6 @@ import org.jruby.util.ByteList;
 
 import static com.headius.backport9.buffer.Buffers.positionBuffer;
 
-/**
- *
- * @author enebo
- */
 public class IRReaderStream implements IRReaderDecoder, IRPersistenceValues {
     private final ByteBuffer buf;
     private final IRManager manager;
@@ -265,12 +261,14 @@ public class IRReaderStream implements IRReaderDecoder, IRPersistenceValues {
             case BINDING_LOAD: return LoadLocalVarInstr.decode(this);
             case BINDING_STORE: return StoreLocalVarInstr.decode(this);
             case BLOCK_GIVEN: return BlockGivenInstr.decode(this);
+            case BLOCK_GIVEN_CALL: return BlockGivenCallInstr.decode(this);
             case BNE: return BNEInstr.decode(this);
             case BREAK: return BreakInstr.decode(this);
             case BUILD_BACKREF: return BuildBackrefInstr.decode(this);
             case BUILD_COMPOUND_ARRAY: return BuildCompoundArrayInstr.decode(this);
             case BUILD_COMPOUND_STRING: return BuildCompoundStringInstr.decode(this);
             case BUILD_DREGEXP: return BuildDynRegExpInstr.decode(this);
+            case BUILD_NTHREF: return BuildNthRefInstr.decode(this);
             case BUILD_RANGE: return BuildRangeInstr.decode(this);
             case BUILD_SPLAT: return BuildSplatInstr.decode(this);
             case CALL_1F:
@@ -294,6 +292,7 @@ public class IRReaderStream implements IRReaderDecoder, IRPersistenceValues {
             case EQQ: return EQQInstr.decode(this);
             case EXC_REGION_END: return new ExceptionRegionEndMarkerInstr();
             case EXC_REGION_START: return ExceptionRegionStartMarkerInstr.decode(this);
+            case FRAME_NAME_CALL: return FrameNameCallInstr.decode(this);
             case GET_CVAR: return GetClassVariableInstr.decode(this);
             case GET_ENCODING: return GetEncodingInstr.decode(this);
             case GET_ERROR_INFO: return GetErrorInfoInstr.decode(this);
@@ -519,6 +518,7 @@ public class IRReaderStream implements IRReaderDecoder, IRPersistenceValues {
             case BIGNUM: return Bignum.decode(this);
             case BOOLEAN: return org.jruby.ir.operands.Boolean.decode(this);
             case BUILTIN_CLASS: return BuiltinClass.decode(this);
+            case CHILLED_STRING: return ChilledString.decode(this);
             case COMPLEX: return Complex.decode(this);
             case CURRENT_SCOPE: return CurrentScope.decode(this);
             case DYNAMIC_SYMBOL: return DynamicSymbol.decode(this);
@@ -529,10 +529,10 @@ public class IRReaderStream implements IRReaderDecoder, IRPersistenceValues {
             case GLOBAL_VARIABLE: return GlobalVariable.decode(this);
             case HASH: return Hash.decode(this);
             case IR_EXCEPTION: return IRException.decode(this);
+            case INTEGER: return org.jruby.ir.operands.Integer.decode(this);
             case LABEL: return Label.decode(this);
             case LOCAL_VARIABLE: return LocalVariable.decode(this);
             case NIL: return manager.getNil();
-            case NTH_REF: return NthRef.decode(this);
             case NULL_BLOCK: return NullBlock.decode(this);
             case RANGE: return Range.decode(this);
             case RATIONAL: return Rational.decode(this);

@@ -33,6 +33,10 @@ import org.jruby.util.cli.Options;
 import org.jruby.util.collections.StringArraySet;
 import org.jruby.util.func.TriFunction;
 
+import static org.jruby.api.Access.fileClass;
+import static org.jruby.api.Create.newArray;
+import static org.jruby.api.Create.newString;
+
 public class LibrarySearcher {
     public static final char EXTENSION_TYPE = 's';
     public static final char SOURCE_TYPE = 'r';
@@ -52,16 +56,16 @@ public class LibrarySearcher {
     private final Map<StringWrapper, Feature> loadedFeaturesIndex = new ConcurrentHashMap<>(64);
 
     public LibrarySearcher(LoadService loadService) {
-        Ruby runtime = loadService.runtime;
+        this.runtime = loadService.runtime;
+        var context = runtime.getCurrentContext();
 
-        this.runtime = runtime;
-        this.loadPath = RubyArray.newArray(runtime);
+        this.loadPath = newArray(context);
         this.loadService = loadService;
-        this.cwdPathEntry = new NormalPathEntry(runtime.newString("."));
-        this.classloaderPathEntry = new NormalPathEntry(runtime.newString(URLResource.URI_CLASSLOADER));
+        this.cwdPathEntry = new NormalPathEntry(newString(context, "."));
+        this.classloaderPathEntry = new NormalPathEntry(newString(context, URLResource.URI_CLASSLOADER));
         this.nullPathEntry = new NullPathEntry();
         this.homePathEntry = new HomePathEntry();
-        this.loadedFeaturesSnapshot = runtime.newArray();
+        this.loadedFeaturesSnapshot = newArray(context);
     }
 
     public List<LibrarySearcher.PathEntry> getExpandedLoadPath() {
@@ -246,7 +250,12 @@ public class LibrarySearcher {
     }
 
     public static boolean isSourceExt(String file) {
-        return file.endsWith(".rb");
+        for (Suffix suffix : Suffix.SOURCES) {
+            if (file.endsWith(suffix.extension)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static boolean isLibraryExt(String file) {
@@ -381,7 +390,8 @@ public class LibrarySearcher {
 
         if (feature.charAt(0) == '.' &&
                 (feature.charAt(1) == '/' || feature.regionMatches(1, "./", 0, 2))) {
-            feature = RubyFile.expand_path(runtime.getCurrentContext(), runtime.getFile(), runtime.newString(feature)).asJavaString();
+            var context = runtime.getCurrentContext();
+            feature = RubyFile.expand_path(context, fileClass(context), newString(context, feature)).asJavaString();
         }
         if (ext != -1 && feature.indexOf('/', ext) == -1) {
             if (LibrarySearcher.isSourceExt(feature)) {
@@ -407,7 +417,7 @@ public class LibrarySearcher {
 
         name.setFrozen(true);
 
-        loadedFeatures.append(name);
+        loadedFeatures.append(runtime.getCurrentContext(), name);
 
         snapshotLoadedFeatures();
 
@@ -415,7 +425,7 @@ public class LibrarySearcher {
     }
 
     protected synchronized RubyArray snapshotLoadedFeatures() {
-        return (RubyArray) loadedFeaturesSnapshot.replace(this.loadService.loadedFeatures);
+        return (RubyArray) loadedFeaturesSnapshot.replace(runtime.getCurrentContext(), this.loadService.loadedFeatures);
     }
 
     protected synchronized void addFeatureToIndex(String name, IRubyObject featurePath) {
@@ -700,13 +710,17 @@ public class LibrarySearcher {
         }
         else {
             int e;
-            for (e = nameLength - 1; e >= 0 && name.charAt(e) != '.' && name.charAt(e) != '/'; --e);
+            // search from end until we find '.' or '/' or we're at the first character
+            for (e = nameLength - 1; e > 0 && name.charAt(e) != '.' && name.charAt(e) != '/'; --e);
+            // if initial character is not '.' or we have too few chars left or the remaining region doesn't match, quit
             if (name.charAt(e) != '.' ||
                     e < featureLength ||
                     !name.regionMatches(e - featureLength, feature, 0, featureLength))
                 return null;
+            // new path length is current position minus the feature length
             plen = e - featureLength;
         }
+        // if path length is zero or the last character of path is not '/', quit
         if (plen > 0 && name.charAt(plen-1) != '/') {
             return null;
         }
@@ -806,6 +820,12 @@ public class LibrarySearcher {
         }
 
         return false;
+    }
+
+    // Clear caches and release resources
+    public void tearDown() {
+        loadedFeaturesIndex.clear();
+        loadedFeaturesSnapshot.clear();
     }
 
     enum Suffix {
@@ -954,7 +974,8 @@ public class LibrarySearcher {
                 script.setFileName(scriptName);
                 runtime.loadScope(script, wrap);
             } catch(IOException e) {
-                throw runtime.newLoadError("no such file to load -- " + searchName, searchName);
+                String name = searchName;
+                throw LoadService.loadFailed(runtime, name);
             }
         }
     }

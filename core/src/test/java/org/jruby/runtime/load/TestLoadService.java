@@ -29,34 +29,35 @@
 
 package org.jruby.runtime.load;
 
-import org.jruby.Ruby;
 import org.jruby.exceptions.RaiseException;
-import org.jruby.runtime.load.ClassExtensionLibrary;
-import org.jruby.runtime.load.LoadService;
 import org.jruby.test.Base;
 import org.jruby.test.BasicLibraryTestService;
+
+import java.util.Collections;
+
+import static org.jruby.api.Access.loadService;
 
 public class TestLoadService extends Base {
 
     private LoadService loadService;
-    public void setUp() {
-        runtime = Ruby.newInstance();
-        loadService = (LoadService) runtime.getLoadService();
+    public void setUp() throws Exception {
+        super.setUp();
+        loadService = loadService(context);
     }
     
     public void testRequireSocket() {
-        runtime.evalScriptlet("require 'socket'");
+        context.runtime.evalScriptlet("require 'socket'");
     }
 
     public void testExtensionLoader() {
         BasicLibraryTestService.counter = 0;
-        runtime.evalScriptlet("require 'org/jruby/test/basic_library_test'");
+        context.runtime.evalScriptlet("require 'org/jruby/test/basic_library_test'");
         assertEquals("The library should've have been loaded", BasicLibraryTestService.counter, 1);
     }
     
     public void testRequireEmpty(){
         try{
-            runtime.evalScriptlet("require ''");
+            context.runtime.evalScriptlet("require ''");
         } catch (RaiseException e){
             assertTrue("Empty library is not valid, exception should have been raised", RaiseException.class.isAssignableFrom(e.getClass()));
             assertNull("Empty library is not valid, exception should only be RaiseException with no root cause", e.getCause());
@@ -66,7 +67,7 @@ public class TestLoadService extends Base {
     public void testNonExistentRequire() {
         try{
             // presumably this require should fail
-            runtime.evalScriptlet("require 'somethingthatdoesnotexist'");
+            context.runtime.evalScriptlet("require 'somethingthatdoesnotexist'");
         } catch (RaiseException e){
             assertTrue("Require of non-existent library should fail", RaiseException.class.isAssignableFrom(e.getClass()));
             assertNull("Require of non-existent library should , exception should only be RaiseException with no root cause", e.getCause());
@@ -77,7 +78,7 @@ public class TestLoadService extends Base {
         try{
             // JRUBY-646
             // presumably this require should fail
-            runtime.evalScriptlet("require 'rubygems'; require 'somethingthatdoesnotexist'");
+            context.runtime.evalScriptlet("require 'rubygems'; require 'somethingthatdoesnotexist'");
         } catch (RaiseException e){
             assertTrue("Require of non-existent library should fail", RaiseException.class.isAssignableFrom(e.getClass()));
             assertNull("Require of non-existent library should , exception should only be RaiseException with no root cause", e.getCause());
@@ -121,5 +122,12 @@ public class TestLoadService extends Base {
         sw.clear();
 
         assertEquals("StringWrapper()", sw.toString());
+    }
+
+    public void testLoadedFeatureWithPath() {
+        // Test that a simple feature lock name does not trigger AIOOB (https://github.com/jruby/jruby/issues/8958)
+        String lockedFeature = "previous_feature";
+        String feature = "current_feature";
+        assertEquals(null, LibrarySearcher.loadedFeatureWithPath(lockedFeature, feature, LibrarySearcher.Suffix.RUBY, Collections.EMPTY_LIST));
     }
 }

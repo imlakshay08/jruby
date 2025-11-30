@@ -49,9 +49,17 @@ import org.jruby.util.ShellLauncher;
 import org.jruby.util.StringSupport;
 import org.jruby.util.cli.Options;
 
+import static org.jruby.api.Access.encodingService;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.toInt;
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Error.argumentError;
+import static org.jruby.api.Error.runtimeError;
 import static org.jruby.util.StringSupport.*;
 
 public class OpenFile implements Finalizable {
+
+    private static final int IO_MAX_BUFFER_GROWTH = 8 * 1024 * 1024;
 
     // RB_IO_FPTR_NEW, minus fields that Java already initializes the same way
     public OpenFile(RubyIO io, IRubyObject nil) {
@@ -210,12 +218,15 @@ public class OpenFile implements Finalizable {
         return mode;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public String getModeAsString(Ruby runtime) {
+        return getModeAsString(runtime.getCurrentContext());
+    }
+
+    public String getModeAsString(ThreadContext context) {
         String modeString = getStringFromMode(mode);
 
-        if (modeString == null) {
-            throw runtime.newArgumentError("Illegal access modenum " + Integer.toOctalString(mode));
-        }
+        if (modeString == null) throw argumentError(context, "Illegal access modenum " + Integer.toOctalString(mode));
 
         return modeString;
     }
@@ -244,10 +255,15 @@ public class OpenFile implements Finalizable {
         return oflags;
     }
 
-    // MRI: rb_io_oflags_modestr
+    @Deprecated(since = "10.0.0.0")
     public static String ioOflagsModestr(Ruby runtime, int oflags) {
+        return ioOflagsModestr(runtime.getCurrentContext(), oflags);
+    }
+
+    // MRI: rb_io_oflags_modestr
+    public static String ioOflagsModestr(ThreadContext context, int oflags) {
         if ((oflags & OpenFlags.O_EXLOCK.intValue()) != 0) {
-            throw runtime.newArgumentError("exclusive access mode is not supported");
+            throw argumentError(context, "exclusive access mode is not supported");
         }
         int accmode = oflags & (OpenFlags.O_RDONLY.intValue()|OpenFlags.O_WRONLY.intValue()|OpenFlags.O_RDWR.intValue());
         if ((oflags & OpenFlags.O_APPEND.intValue()) != 0) {
@@ -260,7 +276,7 @@ public class OpenFile implements Finalizable {
         }
         switch (OpenFlags.valueOf(oflags & (OpenFlags.O_RDONLY.intValue()|OpenFlags.O_WRONLY.intValue()|OpenFlags.O_RDWR.intValue()))) {
             default:
-                throw runtime.newArgumentError("invalid access oflags 0x" + Integer.toHexString(oflags));
+                throw argumentError(context, "invalid access oflags 0x" + Integer.toHexString(oflags));
             case O_RDONLY:
                 return MODE_BINARY(oflags, "r", "rb");
             case O_WRONLY:
@@ -270,9 +286,14 @@ public class OpenFile implements Finalizable {
         }
     }
 
-    // MRI: rb_io_modestr_oflags
+    @Deprecated(since = "10.0.0.0")
     public static int ioModestrOflags(Ruby runtime, String modestr) {
-        return ioFmodeOflags(ioModestrFmode(runtime, modestr));
+        return ioModestrOflags(runtime.getCurrentContext(), modestr);
+    }
+
+    // MRI: rb_io_modestr_oflags
+    public static int ioModestrOflags(ThreadContext context, String modestr) {
+        return ioFmodeOflags(ioModestrFmode(context, modestr));
     }
 
     // MRI: rb_io_fmode_oflags
@@ -312,12 +333,17 @@ public class OpenFile implements Finalizable {
         return oflags;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static int ioModestrFmode(Ruby runtime, String modestr) {
+        return ioModestrFmode(runtime.getCurrentContext(), modestr);
+    }
+
+    public static int ioModestrFmode(ThreadContext context, String modestr) {
         int fmode = 0;
         char[] mChars = modestr.toCharArray(), pChars = null;
         int m = 0, p = 0;
 
-        if (mChars.length == 0) throw runtime.newArgumentError("invalid access mode " + modestr);
+        if (mChars.length == 0) throw argumentError(context, "invalid access mode " + modestr);
 
         switch (mChars[m++]) {
             case 'r':
@@ -330,7 +356,7 @@ public class OpenFile implements Finalizable {
                 fmode |= OpenFile.WRITABLE | OpenFile.APPEND | OpenFile.CREATE;
                 break;
             default:
-                throw runtime.newArgumentError("invalid access mode " + modestr);
+                throw argumentError(context, "invalid access mode " + modestr);
         }
 
         loop: while (m < mChars.length) {
@@ -345,26 +371,28 @@ public class OpenFile implements Finalizable {
                     fmode |= OpenFile.READWRITE;
                     break;
                 case 'x':
-                    if (mChars[0] != 'w') {
-                        throw runtime.newArgumentError("invalid access mode " + modestr);
-                    }
+                    if (mChars[0] != 'w') throw argumentError(context, "invalid access mode " + modestr);
+
                     fmode |= OpenFile.EXCLUSIVE;
                     break;
                 case ':':
                     pChars = mChars;
                     p = m;
-                    if ((fmode & OpenFile.BINMODE) != 0 && (fmode & OpenFile.TEXTMODE) != 0)
-                        throw runtime.newArgumentError("invalid access mode " + modestr);
+                    if ((fmode & OpenFile.BINMODE) != 0 && (fmode & OpenFile.TEXTMODE) != 0) {
+                        throw argumentError(context, "invalid access mode " + modestr);
+                    }
                     break loop;
                 default:
-                    throw runtime.newArgumentError("invalid access mode " + modestr);
+                    throw argumentError(context, "invalid access mode " + modestr);
             }
         }
 
-        if ((fmode & OpenFile.BINMODE) != 0 && (fmode & OpenFile.TEXTMODE) != 0)
-            throw runtime.newArgumentError("invalid access mode " + modestr);
-        if (p != 0 && ioEncnameBomP(new String(pChars, p, pChars.length - p), 0))
+        if ((fmode & OpenFile.BINMODE) != 0 && (fmode & OpenFile.TEXTMODE) != 0) {
+            throw argumentError(context, "invalid access mode " + modestr);
+        }
+        if (p != 0 && ioEncnameBomP(new String(pChars, p, pChars.length - p), 0)) {
             fmode |= OpenFile.SETENC_BY_BOM;
+        }
 
         return fmode;
     }
@@ -857,7 +885,7 @@ public class OpenFile implements Finalizable {
         }
     }
 
-    @Deprecated // no longer used
+    @Deprecated(since = "9.2.1.0") // no longer used
     public static final Finalizer PIPE_FINALIZE = new Finalizer() {
         @Override
         public void finalize(Ruby runtime, OpenFile fptr, boolean noraise) {
@@ -913,7 +941,7 @@ public class OpenFile implements Finalizable {
             }
             else {
                 if (io_fflush(context) < 0 && err == context.nil) {
-                    err = RubyFixnum.newFixnum(runtime, posix.getErrno() == null ? 0 : posix.getErrno().longValue());
+                    err = asFixnum(context, posix.getErrno() == null ? 0 : posix.getErrno().longValue());
                 }
             }
         }
@@ -928,18 +956,18 @@ public class OpenFile implements Finalizable {
 	        /* stdio_file is deallocated anyway
              * even if fclose failed.  */
             if (posix.close(stdio_file) < 0 && err.isNil())
-                err = noraise ? context.tru : RubyNumeric.int2fix(runtime, posix.getErrno().intValue());
+                err = noraise ? context.tru : asFixnum(context, posix.getErrno().intValue());
         } else if (fd != null) {
             /* fptr->fd may be closed even if close fails.
              * POSIX doesn't specify it.
              * We assumes it is closed.  */
             if ((posix.close(fd) < 0) && err.isNil())
-                err = noraise ? context.tru : runtime.newFixnum(posix.getErrno().intValue());
+                err = noraise ? context.tru : asFixnum(context, posix.getErrno().intValue());
         }
 
         if (!err.isNil() && !noraise) {
             if (err instanceof RubyFixnum || err instanceof RubyBignum) {
-                posix.setErrno(Errno.valueOf(RubyNumeric.num2int(err)));
+                posix.setErrno(Errno.valueOf(toInt(context, err)));
                 throw runtime.newErrnoFromErrno(posix.getErrno(), pathv);
             } else {
                 throw ((RubyException)err).toThrowable();
@@ -957,7 +985,7 @@ public class OpenFile implements Finalizable {
 
     // MRI: NEED_WRITECONV
     public boolean needsWriteConversion(ThreadContext context) {
-        Encoding ascii8bit = context.runtime.getEncodingService().getAscii8bitEncoding();
+        Encoding ascii8bit = encodingService(context).getAscii8bitEncoding();
 
         return Platform.IS_WINDOWS ?
                 ((encs.enc != null && encs.enc != ascii8bit) || (encs.ecflags & ((EConvFlags.DECORATOR_MASK & ~EConvFlags.CRLF_NEWLINE_DECORATOR)|EConvFlags.STATEFUL_DECORATOR_MASK)) != 0)
@@ -1009,7 +1037,7 @@ public class OpenFile implements Finalizable {
         ecflags = encs.ecflags & ~EConvFlags.NEWLINE_DECORATOR_READ_MASK;
         ecopts = encs.ecopts;
 
-        Encoding ascii8bit = context.runtime.getEncodingService().getAscii8bitEncoding();
+        Encoding ascii8bit = encodingService(context).getAscii8bitEncoding();
         if (encs.enc == null || (encs.enc == ascii8bit && encs.enc2 == null)) {
             /* no encoding conversion */
             writeconvPreEcflags = 0;
@@ -1080,7 +1108,7 @@ public class OpenFile implements Finalizable {
     private static final byte[] EMPTY_BYTE_ARRAY = ByteList.NULL_ARRAY;
 
     // MRI: appendline
-    public int appendline(ThreadContext context, int delim, final ByteList[] strp, final int[] lp) {
+    public int appendline(ThreadContext context, int delim, final ByteList[] strp, final int[] lp, Encoding enc) {
         ByteList str = strp[0];
         int limit = lp[0];
 
@@ -1094,9 +1122,9 @@ public class OpenFile implements Finalizable {
                     byte[] pBytes = READ_CHAR_PENDING_PTR();
                     p = READ_CHAR_PENDING_OFF();
                     if (0 < limit && limit < searchlen) searchlen = limit;
-                    e = memchr(pBytes, p, delim, searchlen);
+                    e = searchDelimiter(pBytes, p, delim, searchlen, enc);
                     if (e != -1) {
-                        int len = e - p + 1;
+                        int len = e - p;
                         if (str == null) {
                             strp[0] = str = new ByteList(pBytes, p, len);
                         } else {
@@ -1138,8 +1166,8 @@ public class OpenFile implements Finalizable {
                 int last;
 
                 if (limit > 0 && pending > limit) pending = limit;
-                int e = memchr(pBytes, p, delim, pending);
-                if (e != -1) pending = e - p + 1;
+                int e = searchDelimiter(pBytes, p, delim, pending, enc);
+                if (e != -1) pending = e - p;
                 if (str != null) {
                     last = str.getRealSize();
                     str.ensure(last + pending);
@@ -1164,6 +1192,29 @@ public class OpenFile implements Finalizable {
         } while (fillbuf(context) >= 0);
         lp[0] = limit;
         return EOF;
+    }
+
+    // MRI: search_delim
+    private static int searchDelimiter(byte[] pBytes, int p, int delim, int len, Encoding enc) {
+        if (enc.minLength() == 1) {
+            p = memchr(pBytes, p, delim, len);
+            if (p != -1) return p + 1;
+        } else {
+            int end = p + len;
+            while (p < end) {
+                int r = StringSupport.preciseLength(enc, pBytes, p, end);
+                if (!MBCLEN_CHARFOUND_P(r)) {
+                    p += enc.minLength();
+                    continue;
+                }
+                int n = MBCLEN_CHARFOUND_LEN(r);
+                if (enc.mbcToCode(pBytes, p, end) == delim) {
+                    return p + n;
+                }
+                p += n;
+            }
+        }
+        return -1;
     }
 
     private static int memchr(byte[] pBytes, int p, int delim, int length) {
@@ -1245,7 +1296,7 @@ public class OpenFile implements Finalizable {
                     rbuf.len += putbackable;
                 }
 
-                exc = EncodingUtils.makeEconvException(context.runtime, readconv);
+                exc = EncodingUtils.makeEconvException(context, readconv);
                 if (exc != null)
                     return exc;
 
@@ -1670,12 +1721,10 @@ public class OpenFile implements Finalizable {
 
     // swallow
     public boolean swallow(ThreadContext context, int term) {
-        Ruby runtime = context.runtime;
-
         boolean locked = lock();
         try {
             if (needsReadConversion()) {
-                Encoding enc = readEncoding(runtime);
+                Encoding enc = readEncoding(context.runtime);
                 boolean needconv = enc.minLength() != 1;
                 SET_BINARY_MODE();
                 makeReadConversion(context);
@@ -1715,7 +1764,7 @@ public class OpenFile implements Finalizable {
                     i = cnt;
                     while (--i != 0 && (pBytes[++p] & 0xFF) == term) ;
                     if (readBufferedData(buf, 0, cnt - i) == 0) /* must not fail */
-                        throw context.runtime.newRuntimeError("failure copying buffered IO bytes");
+                        throw runtimeError(context, "failure copying buffered IO bytes");
                 }
                 READ_CHECK(context);
             } while (fillbuf(context) == 0);
@@ -1765,7 +1814,6 @@ public class OpenFile implements Finalizable {
 
     // rb_io_getline_fast
     public IRubyObject getlineFast(ThreadContext context, Encoding enc, RubyIO io, boolean chomp) {
-        Ruby runtime = context.runtime;
         RubyString str = null;
         ByteList strByteList;
         int len = 0;
@@ -1789,7 +1837,7 @@ public class OpenFile implements Finalizable {
                         if (chomp) chomplen = ((pending > 1 && pBytes[e - 1] == '\r') ? 1 : 0) + 1;
                     }
                     if (str == null) {
-                        str = RubyString.newString(runtime, pBytes, p, pending - chomplen);
+                        str = newString(context, pBytes, p, pending - chomplen);
                         strByteList = str.getByteList();
                         rbuf.off += pending;
                         rbuf.len -= pending;
@@ -1812,9 +1860,9 @@ public class OpenFile implements Finalizable {
                 READ_CHECK(context);
             } while (fillbuf(context) >= 0);
             if (str == null) return context.nil;
-            str = (RubyString) EncodingUtils.ioEncStr(runtime, str, this);
+            str = EncodingUtils.ioEncStr(context.runtime, str, this);
             str.setCodeRange(cr);
-            incrementLineno(runtime, io);
+            incrementLineno(context.runtime, io);
         } finally {
             if (locked) unlock();
         }
@@ -1836,7 +1884,7 @@ public class OpenFile implements Finalizable {
         }
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.8.0")
     public void incrementLineno(Ruby runtime) {
         boolean locked = lock();
         try {
@@ -1854,28 +1902,29 @@ public class OpenFile implements Finalizable {
         int pos;
         Encoding enc;
         int cr;
+        RubyString string;
 
         boolean locked = lock();
         try {
             if (needsReadConversion()) {
                 SET_BINARY_MODE();
-                str = EncodingUtils.setStrBuf(runtime, str, 0);
+                string = EncodingUtils.setStrBuf(runtime, str, 0);
                 makeReadConversion(context);
                 while (true) {
                     Object v;
                     if (cbuf.len != 0) {
-                        str = shiftCbuf(context, cbuf.len, str);
+                        string = shiftCbuf(context, cbuf.len, string);
                     }
                     v = fillCbuf(context, 0);
                     if (!v.equals(MORE_CHAR_SUSPENDED) && !v.equals(MORE_CHAR_FINISHED)) {
                         if (cbuf.len != 0) {
-                            shiftCbuf(context, cbuf.len, str);
+                            shiftCbuf(context, cbuf.len, string);
                         }
                         throw (RaiseException) v;
                     }
                     if (v.equals(MORE_CHAR_FINISHED)) {
                         clearReadConversion();
-                        return EncodingUtils.ioEncStr(runtime, str, this);
+                        return EncodingUtils.ioEncStr(runtime, string, this);
                     }
                 }
             }
@@ -1890,11 +1939,11 @@ public class OpenFile implements Finalizable {
             if (siz == 0) siz = BUFSIZ;
             for (; ; ) {
                 READ_CHECK(context);
-                str = EncodingUtils.setStrBuf(context.runtime, str, siz);
-                ByteList strByteList = ((RubyString) str).getByteList();
+                str = string = EncodingUtils.setStrBuf(context.runtime, str, siz);
+                ByteList strByteList = string.getByteList();
                 n = fread(context, strByteList.unsafeBytes(), strByteList.begin() + bytes, siz - bytes);
                 if (n == 0 && bytes == 0) {
-                    ((RubyString) str).resize(0);
+                    string.resize(0);
                     break;
                 }
                 bytes += n;
@@ -1907,16 +1956,25 @@ public class OpenFile implements Finalizable {
                 }
                 if (bytes < siz) break;
                 siz += BUFSIZ;
-                ((RubyString) str).modify(BUFSIZ);
+
+                int capa = string.capacity();
+                if (capa < string.size() + BUFSIZ) {
+                    if (capa < BUFSIZ) {
+                        capa = BUFSIZ;
+                    } else if (capa > IO_MAX_BUFFER_GROWTH) {
+                        capa = IO_MAX_BUFFER_GROWTH;
+                    }
+                    string.modifyExpand(capa);
+                }
             }
-            str = EncodingUtils.ioEncStr(runtime, str, this);
+            string = EncodingUtils.ioEncStr(runtime, string, this);
         } finally {
             if (locked) unlock();
         }
 
-        ((RubyString)str).setCodeRange(cr);
+        string.setCodeRange(cr);
 
-        return str;
+        return string;
     }
 
     // io_bufread
@@ -2070,7 +2128,7 @@ public class OpenFile implements Finalizable {
                 return context.nil;
             }
             if (enc.isAsciiCompatible() && Encoding.isAscii(rbuf.ptr[rbuf.off])) {
-                str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, 1);
+                str = newString(context, rbuf.ptr, rbuf.off, 1);
                 rbuf.off += 1;
                 rbuf.len -= 1;
                 cr = StringSupport.CR_7BIT;
@@ -2079,13 +2137,13 @@ public class OpenFile implements Finalizable {
                 r = preciseLength(enc, rbuf.ptr, rbuf.off, rbuf.off + rbuf.len);
                 if (StringSupport.MBCLEN_CHARFOUND_P(r) &&
                         (n = StringSupport.MBCLEN_CHARFOUND_LEN(r)) <= rbuf.len) {
-                    str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, n);
+                    str = newString(context, rbuf.ptr, rbuf.off, n);
                     rbuf.off += n;
                     rbuf.len -= n;
                     cr = StringSupport.CR_VALID;
                 }
                 else if (StringSupport.MBCLEN_NEEDMORE_P(r)) {
-                    str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, rbuf.len);
+                    str = newString(context, rbuf.ptr, rbuf.off, rbuf.len);
                     rbuf.len = 0;
                     getc_needmore: while (true) {
                         if (fillbuf(context) != -1) {
@@ -2105,7 +2163,7 @@ public class OpenFile implements Finalizable {
                     }
                 }
                 else {
-                    str = RubyString.newString(runtime, rbuf.ptr, rbuf.off, 1);
+                    str = newString(context, rbuf.ptr, rbuf.off, 1);
                     rbuf.off++;
                     rbuf.len--;
                 }
@@ -2298,7 +2356,7 @@ public class OpenFile implements Finalizable {
                 Encoding common_encoding = getCommonEncodingForWriteConv(context, str.getEncoding());
 
                 if (common_encoding != null) {
-                    str = (RubyString) EncodingUtils.rbStrEncode(context, str, runtime.getEncodingService().convertEncodingToRubyEncoding(common_encoding), writeconvPreEcflags, writeconvPreEcopts);
+                    str = (RubyString) EncodingUtils.rbStrEncode(context, str, encodingService(context).convertEncodingToRubyEncoding(common_encoding), writeconvPreEcflags, writeconvPreEcopts);
                 }
 
                 if (writeconv != null) {
@@ -2335,7 +2393,7 @@ public class OpenFile implements Finalizable {
             if (writeconvAsciicompat != null)
                 common_encoding = writeconvAsciicompat;
             else if (EncodingUtils.MODE_BTMODE(fmode, EncodingUtils.DEFAULT_TEXTMODE, 0, 1) != 0 && !strEncoding.isAsciiCompatible()) {
-                throw context.runtime.newArgumentError("ASCII incompatible string written for text mode IO without encoding conversion: %s" + strEncoding.toString());
+                throw argumentError(context, "ASCII incompatible string written for text mode IO without encoding conversion: %s" + strEncoding.toString());
             }
         } else {
             if (encs.enc2 != null)
@@ -2592,12 +2650,13 @@ public class OpenFile implements Finalizable {
                             }
                             break retry;
                         }
-                        return noalloc ? context.tru : RubyFixnum.newFixnum(runtime, (posix.getErrno() == null) ? 0 : posix.getErrno().longValue());
+                        return noalloc ?
+                                context.tru : asFixnum(context, (posix.getErrno() == null) ? 0 : posix.getErrno().longValue());
                     }
                     if (res == EConvResult.InvalidByteSequence ||
                             res == EConvResult.IncompleteInput ||
                             res == EConvResult.UndefinedConversion) {
-                        return noalloc ? context.tru : EncodingUtils.makeEconvException(runtime, writeconv).getException();
+                        return noalloc ? context.tru : EncodingUtils.makeEconvException(context, writeconv).getException();
                     }
                 }
 
@@ -2608,7 +2667,7 @@ public class OpenFile implements Finalizable {
             while (res == EConvResult.DestinationBufferFull) {
                 if (wbuf.len == wbuf.capa) {
                     if (io_fflush(context) < 0)
-                        return noalloc ? context.tru : runtime.newFixnum(posix.getErrno() == null ? 0 : posix.getErrno().longValue());
+                        return noalloc ? context.tru : asFixnum(context, posix.getErrno() == null ? 0 : posix.getErrno().longValue());
                 }
 
                 dsBytes = wbuf.ptr;
@@ -2619,7 +2678,7 @@ public class OpenFile implements Finalizable {
                 if (res == EConvResult.InvalidByteSequence ||
                         res == EConvResult.IncompleteInput ||
                         res == EConvResult.UndefinedConversion) {
-                    return noalloc ? context.tru : EncodingUtils.makeEconvException(runtime, writeconv).getException();
+                    return noalloc ? context.tru : EncodingUtils.makeEconvException(context, writeconv).getException();
                 }
             }
         } finally {
@@ -2712,7 +2771,7 @@ public class OpenFile implements Finalizable {
         }
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.0.0")
     public static int getFModeFromString(String modesString) throws InvalidValueException {
         int fmode = 0;
         int length = modesString.length();
@@ -2985,7 +3044,7 @@ public class OpenFile implements Finalizable {
         return lock.isHeldByCurrentThread();
     }
 
-    @Deprecated
+    @Deprecated(since = "9.3.0.0")
     public long binwrite(ThreadContext context, byte[] ptrBytes, int ptr, int len, boolean nosync) {
         return binwriteInt(context, ptrBytes, ptr, len, nosync);
     }

@@ -34,8 +34,6 @@ package org.jruby.ext.ripper;
 import org.jruby.Ruby;
 
 // FIXME: Document difference between warn and warning (or rename one better)
-/**
- */
 public interface Warnings {
     public enum ID {
         AMBIGUOUS_ARGUMENT,
@@ -113,16 +111,16 @@ public interface Warnings {
     public abstract void warning(ID id, Position position, String message);
     public abstract void warning(ID id, String fileName, int lineNumber, String message);
     
-    @Deprecated
+    @Deprecated(since = "1.7.4")
     public abstract void warn(ID id, String message, Object... data);
-    @Deprecated
+    @Deprecated(since = "1.7.4")
     public abstract void warning(ID id, String message, Object... data);
-    @Deprecated
+    @Deprecated(since = "1.7.4")
     public abstract void warn(ID id, Position position, String message, Object... data);
-    @Deprecated
+    @Deprecated(since = "1.7.4")
     public abstract void warn(ID id, String fileName, int lineNumber, String message, Object... data);
-    @Deprecated
+    @Deprecated(since = "1.7.4")
     public abstract void warning(ID id, Position position, String message, Object... data);
-    @Deprecated
+    @Deprecated(since = "1.7.4")
     public abstract void warning(ID id, String fileName, int lineNumber, String message, Object...data);
 }

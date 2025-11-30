@@ -40,6 +40,13 @@ public class StringBootstrap {
             "string",
             sig(CallSite.class, MethodHandles.Lookup.class, String.class, MethodType.class, String.class, String.class, int.class),
             false);
+
+    public static final Handle CSTRING_BOOTSTRAP = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            p(StringBootstrap.class),
+            "cstring",
+            sig(CallSite.class, MethodHandles.Lookup.class, String.class, MethodType.class, String.class, String.class, int.class, String.class, int.class),
+            false);
     public static final Handle EMPTY_STRING_BOOTSTRAP = new Handle(
             Opcodes.H_INVOKESTATIC,
             p(StringBootstrap.class),
@@ -58,15 +65,31 @@ public class StringBootstrap {
             "fstring",
             sig(CallSite.class, MethodHandles.Lookup.class, String.class, MethodType.class, String.class, String.class, int.class, String.class, int.class),
             false);
+    public static final Handle FSTRING_SIMPLE_BOOTSTRAP = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            p(StringBootstrap.class),
+            "fstringSimple",
+            sig(CallSite.class, MethodHandles.Lookup.class, String.class, MethodType.class, String.class, String.class, int.class),
+            false);
 
     private static final MethodHandle STRING_HANDLE =
             Binder
                     .from(RubyString.class, ThreadContext.class, ByteList.class, int.class)
                     .invokeStaticQuiet(LOOKUP, StringBootstrap.class, "string");
+
+    private static final MethodHandle CSTRING_HANDLE =
+            Binder
+                    .from(RubyString.class, ThreadContext.class, ByteList.class, int.class, String.class, int.class)
+                    .invokeStaticQuiet(LOOKUP, StringBootstrap.class, "chilledString");
+
     private static final MethodHandle FSTRING_HANDLE =
             Binder
                     .from(RubyString.class, ThreadContext.class, MutableCallSite.class, ByteList.class, int.class, String.class, int.class)
                     .invokeStaticQuiet(LOOKUP, StringBootstrap.class, "frozenString");
+    private static final MethodHandle FSTRING_SIMPLE_HANDLE =
+            Binder
+                    .from(RubyString.class, ThreadContext.class, MutableCallSite.class, ByteList.class, int.class)
+                    .invokeStaticQuiet(LOOKUP, StringBootstrap.class, "frozenStringSimple");
     private static final MethodHandle BUFFERSTRING_HANDLE =
             Binder
                     .from(RubyString.class, ThreadContext.class, Encoding.class, int.class, int.class)
@@ -78,6 +101,10 @@ public class StringBootstrap {
 
     public static CallSite string(MethodHandles.Lookup lookup, String name, MethodType type, String value, String encodingName, int cr) {
         return new ConstantCallSite(insertArguments(STRING_HANDLE, 1, bytelist(value, encodingName), cr));
+    }
+
+    public static CallSite cstring(MethodHandles.Lookup lookup, String name, MethodType type, String value, String encodingName, int cr, String file, int line) {
+        return new ConstantCallSite(insertArguments(CSTRING_HANDLE, 1, bytelist(value, encodingName), cr, file, line));
     }
 
     public static CallSite emptyString(MethodHandles.Lookup lookup, String name, MethodType type, String encodingName) {
@@ -97,8 +124,20 @@ public class StringBootstrap {
         return site;
     }
 
+    public static CallSite fstringSimple(MethodHandles.Lookup lookup, String name, MethodType type, String value, String encodingName, int cr) {
+        MutableCallSite site = new MutableCallSite(type);
+
+        site.setTarget(insertArguments(FSTRING_SIMPLE_HANDLE, 1, site, bytelist(value, encodingName), cr));
+
+        return site;
+    }
+
     public static RubyString string(ThreadContext context, ByteList value, int cr) {
         return RubyString.newStringShared(context.runtime, value, cr);
+    }
+
+    public static RubyString chilledString(ThreadContext context, ByteList value, int cr, String file, int line) {
+        return RubyString.newChilledString(context.runtime, value, cr, file, line);
     }
 
     public static RubyString bufferString(ThreadContext context, Encoding encoding, int size, int cr) {
@@ -107,6 +146,15 @@ public class StringBootstrap {
 
     public static RubyString frozenString(ThreadContext context, MutableCallSite site, ByteList value, int cr, String file, int line) {
         RubyString frozen = IRRuntimeHelpers.newFrozenString(context, value, cr, file, line);
+
+        // Permanently bind to the new frozen string
+        site.setTarget(dropArguments(constant(RubyString.class, frozen), 0, ThreadContext.class));
+
+        return frozen;
+    }
+
+    public static RubyString frozenStringSimple(ThreadContext context, MutableCallSite site, ByteList value, int cr) {
+        RubyString frozen = IRRuntimeHelpers.newFrozenString(context, value, cr);
 
         // Permanently bind to the new frozen string
         site.setTarget(dropArguments(constant(RubyString.class, frozen), 0, ThreadContext.class));
@@ -131,7 +179,7 @@ public class StringBootstrap {
         return new ByteList(size, encoding);
     }
 
-    private static Encoding encodingFromName(String encodingName) {
+    public static Encoding encodingFromName(String encodingName) {
         Encoding encoding;
         EncodingDB.Entry entry = EncodingDB.getEncodings().get(encodingName.getBytes());
         if (entry == null) entry = EncodingDB.getAliases().get(encodingName.getBytes());

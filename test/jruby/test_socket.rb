@@ -621,7 +621,7 @@ class UNIXSocketTests < Test::Unit::TestCase
 
         sock2.send("hello", 0)
         assert_equal "hell", sock1.recv(4)
-        assert_equal "", sock1.recv(0)
+        assert_equal nil, sock1.recv(0)
         assert_equal "o", sock1.recv(1)
 
         sock2.close
@@ -651,7 +651,7 @@ class UNIXSocketTests < Test::Unit::TestCase
         rescue IO::EAGAINWaitReadable
         end
         s2.send('a', 0)
-        s1.recv_nonblock(5, nil, str = '')
+        s1.recv_nonblock(5, nil, str = +'')
         assert_equal 'a', str
         assert_raise(IO::EAGAINWaitReadable) { s1.recv_nonblock(5, nil, str) }
         assert_equal :wait_readable, s1.recv_nonblock(5, exception: false)

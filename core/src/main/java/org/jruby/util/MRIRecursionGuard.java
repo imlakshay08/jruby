@@ -13,6 +13,9 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Callable;
 
+import static org.jruby.api.Create.newHash;
+import static org.jruby.api.Error.typeError;
+
 /**
  * Deprecated MRI-style recursion guard logic pulled out of {@link Ruby}.
  */
@@ -22,18 +25,18 @@ public class MRIRecursionGuard {
     private final ThreadLocal<Map<String, RubyHash>> recursive = new ThreadLocal<Map<String, RubyHash>>();
     private final ThreadLocal<Boolean> inRecursiveListOperation = new ThreadLocal<>();
 
-    @Deprecated
+    @Deprecated(since = "9.1.7.0")
     public MRIRecursionGuard(Ruby runtime) {
         this.runtime = runtime;
         this.recursiveKey = runtime.newSymbol("__recursive_key__");
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.7.0")
     public interface RecursiveFunction  {
         IRubyObject call(IRubyObject obj, boolean recur);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.7.0")
     public IRubyObject execRecursive(RecursiveFunction func, IRubyObject obj) {
         if (!inRecursiveListOperation.get()) {
             throw runtime.newThreadError("BUG: execRecursive called outside recursiveListOperation");
@@ -41,7 +44,7 @@ public class MRIRecursionGuard {
         return execRecursiveInternal(func, obj, null, false);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.7.0")
     public IRubyObject execRecursiveOuter(RecursiveFunction func, IRubyObject obj) {
         try {
             return execRecursiveInternal(func, obj, null, true);
@@ -50,7 +53,7 @@ public class MRIRecursionGuard {
         }
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.7.0")
     public <T extends IRubyObject> T recursiveListOperation(Callable<T> body) {
         try {
             inRecursiveListOperation.set(true);
@@ -65,10 +68,11 @@ public class MRIRecursionGuard {
     }
 
     // exec_recursive
-    @Deprecated
+    @Deprecated(since = "9.1.7.0")
     private IRubyObject execRecursiveInternal(RecursiveFunction func, IRubyObject obj, IRubyObject pairid, boolean outer) {
+        var context = runtime.getCurrentContext();
         ExecRecursiveParams p = new ExecRecursiveParams();
-        p.list = recursiveListAccess();
+        p.list = recursiveListAccess(context);
         p.objid = obj.id();
         boolean outermost = outer && !recursiveCheck(p.list, recursiveKey, null);
         if(recursiveCheck(p.list, p.objid, pairid)) {
@@ -83,9 +87,9 @@ public class MRIRecursionGuard {
             p.pairid = pairid;
 
             if(outermost) {
-                recursivePush(p.list, recursiveKey, null);
+                recursivePush(context, p.list, recursiveKey, null);
                 try {
-                    result = execRecursiveI(p);
+                    result = execRecursiveI(context, p);
                 } catch(RecursiveError e) {
                     if(e.tag != p.list) {
                         throw e;
@@ -93,12 +97,12 @@ public class MRIRecursionGuard {
                         result = p.list;
                     }
                 }
-                recursivePop(p.list, recursiveKey, null);
+                recursivePop(context, p.list, recursiveKey, null);
                 if(result == p.list) {
                     result = func.call(obj, true);
                 }
             } else {
-                result = execRecursiveI(p);
+                result = execRecursiveI(context, p);
             }
 
             return result;
@@ -106,21 +110,21 @@ public class MRIRecursionGuard {
     }
 
     // exec_recursive_i
-    private IRubyObject execRecursiveI(ExecRecursiveParams p) {
+    private IRubyObject execRecursiveI(ThreadContext context, ExecRecursiveParams p) {
         IRubyObject result = null;
-        recursivePush(p.list, p.objid, p.pairid);
+        recursivePush(context, p.list, p.objid, p.pairid);
         try {
             result = p.func.call(p.obj, false);
         } finally {
-            recursivePop(p.list, p.objid, p.pairid);
+            recursivePop(context, p.list, p.objid, p.pairid);
         }
         return result;
     }
 
-    private IRubyObject recursiveListAccess() {
+    private IRubyObject recursiveListAccess(ThreadContext context) {
         Map<String, RubyHash> hash = recursive.get();
-        String sym = runtime.getCurrentContext().getFrameName();
-        IRubyObject list = runtime.getNil();
+        String sym = context.getFrameName();
+        IRubyObject list = context.nil;
         if(hash == null) {
             hash = new HashMap<>();
             recursive.set(hash);
@@ -128,7 +132,7 @@ public class MRIRecursionGuard {
             list = hash.get(sym);
         }
         if(list == null || list.isNil()) {
-            list = RubyHash.newHash(runtime);
+            list = newHash(context);
             hash.put(sym, (RubyHash)list);
         }
         return list;
@@ -141,56 +145,46 @@ public class MRIRecursionGuard {
         }
     }
 
-    private void recursivePush(IRubyObject list, IRubyObject obj, IRubyObject paired_obj) {
+    private void recursivePush(ThreadContext context, IRubyObject list, IRubyObject obj, IRubyObject paired_obj) {
         IRubyObject pair_list;
-        Ruby runtime = this.runtime;
-        final ThreadContext context = runtime.getCurrentContext();
         if (paired_obj == null) {
-            ((RubyHash) list).op_aset(context, obj, runtime.getTrue());
+            ((RubyHash) list).op_aset(context, obj, context.tru);
         } else if ((pair_list = ((RubyHash)list).fastARef(obj)) == null) {
             ((RubyHash) list).op_aset(context, obj, paired_obj);
         } else {
             if (!(pair_list instanceof RubyHash)) {
                 IRubyObject other_paired_obj = pair_list;
-                pair_list = RubyHash.newHash(runtime);
-                ((RubyHash) pair_list).op_aset(context, other_paired_obj, runtime.getTrue());
+                pair_list = newHash(context);
+                ((RubyHash) pair_list).op_aset(context, other_paired_obj, context.tru);
                 ((RubyHash) list).op_aset(context, obj, pair_list);
             }
-            ((RubyHash)pair_list).op_aset(context, paired_obj, runtime.getTrue());
+            ((RubyHash)pair_list).op_aset(context, paired_obj, context.tru);
         }
     }
 
-    private void recursivePop(IRubyObject list, IRubyObject obj, IRubyObject paired_obj) {
-        if(paired_obj != null) {
+    private void recursivePop(ThreadContext context, IRubyObject list, IRubyObject obj, IRubyObject paired_obj) {
+        if (paired_obj != null) {
             IRubyObject pair_list = ((RubyHash)list).fastARef(obj);
-            if(pair_list == null) {
-                throw runtime.newTypeError("invalid inspect_tbl pair_list for " + runtime.getCurrentContext().getFrameName());
-            }
-            if(pair_list instanceof RubyHash) {
-                ((RubyHash)pair_list).delete(runtime.getCurrentContext(), paired_obj, Block.NULL_BLOCK);
-                if(!((RubyHash)pair_list).isEmpty()) {
-                    return;
-                }
+            if (pair_list == null) throw typeError(context, "invalid inspect_tbl pair_list for " + context.getFrameName());
+
+            if (pair_list instanceof RubyHash pairHash) {
+                pairHash.delete(context, paired_obj, Block.NULL_BLOCK);
+                if (!pairHash.isEmpty()) return;
             }
         }
-        ((RubyHash)list).delete(runtime.getCurrentContext(), obj, Block.NULL_BLOCK);
+        ((RubyHash)list).delete(context, obj, Block.NULL_BLOCK);
     }
 
     private boolean recursiveCheck(IRubyObject list, IRubyObject obj_id, IRubyObject paired_obj_id) {
         IRubyObject pair_list = ((RubyHash)list).fastARef(obj_id);
-        if(pair_list == null) {
-            return false;
-        }
-        if(paired_obj_id != null) {
-            if(!(pair_list instanceof RubyHash)) {
-                if(pair_list != paired_obj_id) {
-                    return false;
-                }
+        if (pair_list == null) return false;
+
+        if (paired_obj_id != null) {
+            if (!(pair_list instanceof RubyHash)) {
+                if (pair_list != paired_obj_id) return false;
             } else {
                 IRubyObject paired_result = ((RubyHash)pair_list).fastARef(paired_obj_id);
-                if(paired_result == null || paired_result.isNil()) {
-                    return false;
-                }
+                if (paired_result == null || paired_result.isNil()) return false;
             }
         }
         return true;

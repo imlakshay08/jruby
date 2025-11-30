@@ -289,7 +289,7 @@ public class ArgumentProcessor {
                         grabValue(getArgumentError(" -J-cp must be followed by a path expression"));
                     }
                     break FOR;
-                case 'K': // @Deprecated TODO no longer relevant in Ruby 2.x
+                case 'K': // @Deprecated(since = "9.1.3.0") TODO no longer relevant in Ruby 2.x
                     String eArg = grabValue(getArgumentError("provide a value for -K"));
 
                     KCode kcode = KCode.create(eArg);
@@ -376,6 +376,12 @@ public class ArgumentProcessor {
                                         break;
                                     case ":no-experimental":
                                         config.getWarningCategories().remove(RubyWarnings.Category.EXPERIMENTAL);
+                                        break;
+                                    case ":performance":
+                                        config.getWarningCategories().add(RubyWarnings.Category.PERFORMANCE);
+                                        break;
+                                    case ":no-performance":
+                                        config.getWarningCategories().remove(RubyWarnings.Category.PERFORMANCE);
                                         break;
                                     default:
                                         if (temp.charAt(0) == ':') {
@@ -475,7 +481,7 @@ public class ArgumentProcessor {
                                 continue;
                             }
 
-                            config.getError().println("warning: unknown argument for --debug: `" + debug + "'");
+                            config.getError().println("warning: unknown argument for --debug: '" + debug + "'");
                         }
                         break FOR;
                     } else if (argument.startsWith("--encoding")) {
@@ -483,7 +489,7 @@ public class ArgumentProcessor {
                         final int len = argument.length();
                         if (len == "--encoding".length()) {
                             characterIndex = len;
-                            encodingValue = grabValue(getArgumentError("unknown encoding name"));
+                            encodingValue = grabValue(getArgumentError("missing argument for --encoding"), false);
                         } else {
                             int splitIndex = argument.indexOf('=');
                             if (splitIndex == -1 || len == (splitIndex + 1)) {
@@ -587,8 +593,7 @@ public class ArgumentProcessor {
                         break FOR;
                     } else if (argument.equals("--dump")) {
                         characterIndex = argument.length();
-                        String error = "--dump only supports [version, copyright, usage, yydebug, syntax, insns] on JRuby";
-                        String dumpArg = grabValue(getArgumentError(error));
+                        String dumpArg = grabValue("missing argument for --dump", false);
                         if (dumpArg.equals("version")) {
                             config.setShowVersion(true);
                             config.setShouldRunInterpreter(false);
@@ -609,7 +614,7 @@ public class ArgumentProcessor {
                         } else if (dumpArg.equals("insns")) {
                             config.setShowBytecode(true);
                         } else {
-                            MainExitException mee = new MainExitException(1, error);
+                            MainExitException mee = new MainExitException(1, "--dump only supports [version, copyright, usage, yydebug, syntax, insns] on JRuby");
                             mee.setUsageError(true);
                             throw mee;
                         }
@@ -641,7 +646,7 @@ public class ArgumentProcessor {
                         break FOR;
                     } else if (argument.startsWith("--external-encoding")) {
                         characterIndex = argument.length();
-                        String externalEncoding = grabValue(getArgumentError("invalid encoding"));
+                        String externalEncoding = grabValue("missing argument for --external-encoding", false);
                         config.setExternalEncoding(externalEncoding);
                         break FOR;
                     } else if (argument.startsWith("--internal-encoding=")) {
@@ -650,8 +655,26 @@ public class ArgumentProcessor {
                         break FOR;
                     } else if (argument.startsWith("--internal-encoding")) {
                         characterIndex = argument.length();
-                        String internalEncoding = grabValue(getArgumentError("invalid encoding"));
+                        String internalEncoding = grabValue("missing argument for --internal-encoding", false);
                         config.setInternalEncoding(internalEncoding);
+                        break FOR;
+                    } else if (argument.startsWith("--backtrace-limit=")) {
+                        String backtraceLimit = valueListFor(argument, "backtrace-limit")[0];
+                        try {
+                            int limit = Integer.parseInt(backtraceLimit);
+                            config.setBacktraceLimit(limit);
+                        } catch (NumberFormatException nfe) {
+                            throw new MainExitException(1, "jruby: wrong limit for backtrace length");
+                        }
+                    } else if (argument.startsWith("--backtrace-limit")) {
+                        characterIndex = argument.length();
+                        String backtraceLimit = grabValue("missing argument for --backtrace-limit", false);
+                        try {
+                            int limit = Integer.parseInt(backtraceLimit);
+                            config.setBacktraceLimit(limit);
+                        } catch (NumberFormatException nfe) {
+                            throw new MainExitException(1, "jruby: wrong limit for backtrace length");
+                        }
                         break FOR;
                     } else {
                         if (argument.equals("--")) {
@@ -671,7 +694,7 @@ public class ArgumentProcessor {
         BiFunction<ArgumentProcessor, Boolean, Void> feature = FEATURES.get(name);
 
         if (feature == null) {
-            config.getError().println("warning: unknown argument for --" + (enable ? "enable" : "disable") + ": `" + name + "'");
+            config.getError().println("warning: unknown argument for --" + (enable ? "enable" : "disable") + ": '" + name + "'");
         } else {
             feature.apply(this, enable);
         }
@@ -784,7 +807,7 @@ public class ArgumentProcessor {
         return null;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.1.3.0")
     public String resolveScriptUsingClassLoader(String scriptName) {
         if (RubyInstanceConfig.defaultClassLoader().getResourceAsStream("bin/" + scriptName) != null){
             return "classpath:/bin/" + scriptName;

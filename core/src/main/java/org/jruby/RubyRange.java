@@ -44,6 +44,7 @@ import java.util.List;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.api.API;
+import org.jruby.api.JRubyAPI;
 import org.jruby.exceptions.JumpException;
 import org.jruby.runtime.Arity;
 import org.jruby.runtime.Block;
@@ -57,8 +58,13 @@ import org.jruby.runtime.ObjectMarshal;
 import org.jruby.runtime.Signature;
 import org.jruby.runtime.ThreadContext;
 
+import static org.jruby.RubyEnumerator.enumeratorize;
 import static org.jruby.RubyEnumerator.enumeratorizeWithSize;
-import static org.jruby.RubyNumeric.dbl2num;
+import static org.jruby.RubyNumeric.*;
+import static org.jruby.api.Convert.*;
+import static org.jruby.api.Create.*;
+import static org.jruby.api.Define.defineClass;
+import static org.jruby.api.Error.*;
 import static org.jruby.runtime.Helpers.hashEnd;
 import static org.jruby.runtime.Helpers.hashStart;
 import static org.jruby.runtime.Helpers.invokedynamic;
@@ -70,19 +76,19 @@ import org.jruby.runtime.builtin.Variable;
 import org.jruby.runtime.callsite.RespondToCallSite;
 import org.jruby.runtime.component.VariableEntry;
 import org.jruby.runtime.invokedynamic.MethodNames;
-import org.jruby.runtime.marshal.MarshalStream;
-import org.jruby.runtime.marshal.UnmarshalStream;
+import org.jruby.runtime.marshal.MarshalDumper;
+import org.jruby.runtime.marshal.MarshalLoader;
 import org.jruby.util.Numeric;
 import org.jruby.util.TypeConverter;
+import org.jruby.util.io.RubyInputStream;
+import org.jruby.util.io.RubyOutputStream;
 
 import static org.jruby.RubyEnumerator.SizeFn;
-import static org.jruby.RubyNumeric.intervalStepSize;
 
 import static org.jruby.runtime.Visibility.PRIVATE;
+import static org.jruby.util.RubyStringBuilder.str;
+import static org.jruby.util.RubyStringBuilder.types;
 
-/**
- * @author jpetersen
- */
 @JRubyClass(name = "Range", include = "Enumerable")
 public class RubyRange extends RubyObject {
 
@@ -93,26 +99,20 @@ public class RubyRange extends RubyObject {
     private boolean isEndless;
     private boolean isInited = false;
 
-    public static RubyClass createRangeClass(Ruby runtime) {
-        RubyClass result = runtime.defineClass("Range", runtime.getObject(), RubyRange::new);
+    public static RubyClass createRangeClass(ThreadContext context, RubyClass Object, RubyModule Enumerable) {
+        RubyClass Range = defineClass(context, "Range", Object, RubyRange::new).
+                reifiedClass(RubyRange.class).
+                marshalWith(RANGE_MARSHAL).
+                kindOf(new RubyModule.JavaClassKindOf(RubyRange.class)).
+                classIndex(ClassIndex.RANGE).
+                include(context, Enumerable).
+                defineMethods(context, RubyRange.class);
 
-        result.setClassIndex(ClassIndex.RANGE);
-        result.setReifiedClass(RubyRange.class);
+        Range.defineClassUnder(context, "BSearch", Object, OBJECT_ALLOCATOR).defineMethods(context, BSearch.class);
 
-        result.kindOf = new RubyModule.JavaClassKindOf(RubyRange.class);
+        Range.setConstantVisibility(context, "BSearch", true);
 
-        result.setMarshal(RANGE_MARSHAL);
-        result.includeModule(runtime.getEnumerable());
-
-        result.defineAnnotatedMethods(RubyRange.class);
-
-        RubyClass bsearch = result.defineClassUnder("BSearch", runtime.getObject(), OBJECT_ALLOCATOR);
-
-        result.setConstantVisibility(runtime, "BSearch", true);
-
-        bsearch.defineAnnotatedMethods(BSearch.class);
-
-        return result;
+        return Range;
     }
 
     private RubyRange(Ruby runtime, RubyClass klass) {
@@ -127,11 +127,43 @@ public class RubyRange extends RubyObject {
         return range;
     }
 
+    public static RubyRange newBeginlessRange(ThreadContext context, long end, boolean isExclusive) {
+        Ruby runtime = context.runtime;
+        RubyRange range = new RubyRange(runtime, runtime.getRange());
+        range.init(context, context.nil, asFixnum(context, end), isExclusive);
+        range.isInited = true;
+        return range;
+    }
+
+    public static RubyRange newEndlessRange(ThreadContext context, long begin, boolean isExclusive) {
+        Ruby runtime = context.runtime;
+        RubyRange range = new RubyRange(runtime, runtime.getRange());
+        range.init(context, asFixnum(context, begin), context.nil, isExclusive);
+        range.isInited = true;
+        return range;
+    }
+
+    public static RubyRange newRange(ThreadContext context, long begin, long end, boolean isExclusive) {
+        Ruby runtime = context.runtime;
+        RubyRange range = new RubyRange(runtime, runtime.getRange());
+        range.init(context, asFixnum(context, begin), asFixnum(context, end), isExclusive);
+        range.isInited = true;
+        return range;
+    }
+
     public static RubyRange newInclusiveRange(ThreadContext context, IRubyObject begin, IRubyObject end) {
         return newRange(context, begin, end, false);
     }
 
+    public static RubyRange newInclusiveRange(ThreadContext context, long begin, long end) {
+        return newRange(context, begin, end, false);
+    }
+
     public static RubyRange newExclusiveRange(ThreadContext context, IRubyObject begin, IRubyObject end) {
+        return newRange(context, begin, end, true);
+    }
+
+    public static RubyRange newExclusiveRange(ThreadContext context, long begin, long end) {
         return newRange(context, begin, end, true);
     }
 
@@ -143,8 +175,8 @@ public class RubyRange extends RubyObject {
         range.isExclusive = isExclusive;
     }
 
-    final boolean checkBegin(long length) {
-        long beg = isBeginless ? 0 : RubyNumeric.num2long(this.begin);
+    final boolean checkBegin(ThreadContext context, long length) {
+        long beg = isBeginless ? 0 : toLong(context, this.begin);
         if (beg < 0) {
             beg += length;
             if (beg < 0) {
@@ -156,96 +188,79 @@ public class RubyRange extends RubyObject {
         return true;
     }
 
-    final long[] begLen(long len, int err) {
-        long beg = isBeginless ? 0 : RubyNumeric.num2long(this.begin);
-        long end = isEndless ? -1: RubyNumeric.num2long(this.end);
+    final long[] begLen(ThreadContext context, long len, int err) {
+        long beg = isBeginless ? 0 : toLong(context, this.begin);
+        long end = isEndless ? -1: toLong(context, this.end);
 
         if (beg < 0) {
             beg += len;
             if (beg < 0) {
-                if (err != 0) {
-                    throw getRuntime().newRangeError(beg + ".." + (isExclusive ? "." : "") + end + " out of range");
-                }
+                if (err != 0) throw rangeError(context, beg + ".." + (isExclusive ? "." : "") + end + " out of range");
                 return null;
             }
         }
 
         if (err == 0 || err == 2) {
             if (beg > len) {
-                if (err != 0) {
-                    throw getRuntime().newRangeError(beg + ".." + (isExclusive ? "." : "") + end + " out of range");
-                }
+                if (err != 0) throw rangeError(context, beg + ".." + (isExclusive ? "." : "") + end + " out of range");
                 return null;
             }
-            if (end > len) {
-                end = len;
-            }
+            if (end > len) end = len;
         }
 
-        if (end < 0) {
-            end += len;
-        }
-        if (!isExclusive || isEndless) {
-            end++;
-        }
+        if (end < 0) end += len;
+        if (!isExclusive || isEndless) end++;
+
         len = end - beg;
-        if (len < 0) {
-            len = 0;
-        }
+        if (len < 0) len = 0;
 
         return new long[]{beg, len};
     }
 
-    final long begLen0(long len) {
-        long beg = isBeginless ? 0 : RubyNumeric.num2long(this.begin);
+    final long begLen0(ThreadContext context, long len) {
+        long beg = isBeginless ? 0 : toLong(context, this.begin);
 
         if (beg < 0) {
             beg += len;
-            if (beg < 0) {
-                throw getRuntime().newRangeError((beg - len) + ".." + (isExclusive ? "." : "") + end + " out of range");
-            }
+            if (beg < 0) throw rangeError(context, (beg - len) + ".." + (isExclusive ? "." : "") + end + " out of range");
         }
 
         return beg;
     }
 
-    final long begLen1(long len, long beg) {
-        long end = isEndless ? -1 : RubyNumeric.num2long(this.end);
+    final long begLen1(ThreadContext context, long len, long beg) {
+        long end = isEndless ? -1 : toLong(context, this.end);
 
-        if (end < 0) {
-            end += len;
-        }
-        if (!isExclusive || isEndless) {
-            end++;
-        }
+        if (end < 0) end += len;
+        if (!isExclusive || isEndless) end++;
+
         len = end - beg;
-        if (len < 0) {
-            len = 0;
-        }
+        if (len < 0) len = 0;
 
         return len;
     }
 
-    // MRI: rb_range_component_beg_len
+    @Deprecated(since = "10.0.0.0")
     final int[] begLenInt(int len, final int err) {
-        int beg = isBeginless ? 0 : RubyNumeric.num2int(this.begin);
-        int end = isEndless ? -1 : RubyNumeric.num2int(this.end);
+        return begLenInt(getCurrentContext(), len, err);
+    }
+
+    // MRI: rb_range_component_beg_len
+    final int[] begLenInt(ThreadContext context, int len, final int err) {
+        int beg = isBeginless ? 0 : toInt(context, this.begin);
+        int end = isEndless ? -1 : toInt(context, this.end);
 
         if (beg < 0) {
             beg += len;
             if (beg < 0) {
-                if (err != 0) {
-                    throw getRuntime().newRangeError(this.begin + ".." + (isExclusive ? "." : "") + this.end + " out of range");
-                }
+                if (err != 0) throw rangeError(context, begin + ".." + (isExclusive ? "." : "") + this.end + " out of range");
                 return null;
             }
         }
 
         if (err == 0 || err == 2) {
             if (beg > len) {
-                if (err != 0) {
-                    throw getRuntime().newRangeError(this.begin + ".." + (isExclusive ? "." : "") + this.end + " out of range");
-                }
+                if (err != 0) throw rangeError(context, begin + ".." + (isExclusive ? "." : "") + this.end + " out of range");
                 return null;
             }
             if (end > len) {
@@ -253,16 +268,11 @@ public class RubyRange extends RubyObject {
             }
         }
 
-        if (end < 0) {
-            end += len;
-        }
-        if (!isExclusive || isEndless) {
-            end++;
-        }
+        if (end < 0) end += len;
+        if (!isExclusive || isEndless) end++;
+
         len = end - beg;
-        if (len < 0) {
-            len = 0;
-        }
+        if (len < 0) len = 0;
 
         return new int[]{beg, len};
     }
@@ -270,9 +280,7 @@ public class RubyRange extends RubyObject {
     private void init(ThreadContext context, IRubyObject begin, IRubyObject end, boolean isExclusive) {
         if (!(begin instanceof RubyFixnum && end instanceof RubyFixnum) && !end.isNil() && !begin.isNil()) {
             IRubyObject result = invokedynamic(context, begin, MethodNames.OP_CMP, end);
-            if (result.isNil()) {
-                throw context.runtime.newArgumentError("bad value for range");
-            }
+            if (result.isNil()) throw argumentError(context, "bad value for range");
         }
 
         this.begin = begin;
@@ -281,16 +289,14 @@ public class RubyRange extends RubyObject {
         this.isEndless = end.isNil();
         this.isBeginless = begin.isNil();
         this.isInited = true;
-        if (metaClass.getClassIndex() == ClassIndex.RANGE) {
-            this.setFrozen(true);
-        }
+        if (metaClass.getClassIndex() == ClassIndex.RANGE) this.setFrozen(true);
     }
 
     @JRubyMethod(required = 2, optional = 1, checkArity = false, visibility = PRIVATE)
     public IRubyObject initialize(ThreadContext context, IRubyObject[] args, Block unusedBlock) {
         Arity.checkArgumentCount(context, args, 2, 3);
 
-        if (this.isInited) throw context.runtime.newFrozenError("`initialize' called twice", this);
+        if (this.isInited) throw context.runtime.newFrozenError("'initialize' called twice", this);
         checkFrozen();
         init(context, args[0], args[1], args.length > 2 && args[2].isTrue());
         this.isInited = true;
@@ -299,7 +305,7 @@ public class RubyRange extends RubyObject {
 
     @JRubyMethod(visibility = PRIVATE)
     public IRubyObject initialize_copy(ThreadContext context, IRubyObject original) {
-        if (this.isInited) throw context.runtime.newFrozenError("`initialize' called twice", this);
+        if (this.isInited) throw context.runtime.newFrozenError("'initialize' called twice", this);
 
         RubyRange other = (RubyRange) original;
         this.begin = other.begin;
@@ -311,28 +317,18 @@ public class RubyRange extends RubyObject {
         return context.nil;
     }
 
-    @Override
-    public RubyFixnum hash() {
-        return hash(metaClass.runtime.getCurrentContext());
-    }
-
     @JRubyMethod(name = "hash")
     public RubyFixnum hash(ThreadContext context) {
-        Ruby runtime = context.runtime;
-
         int exclusiveBit = isExclusive ? 1 : 0;
         long hash = exclusiveBit;
-        IRubyObject v;
 
-        hash = hashStart(runtime, hash);
-        v = safeHash(context, begin);
-        hash = murmurCombine(hash, v.convertToInteger().getLongValue());
-        v = safeHash(context, end);
-        hash = murmurCombine(hash, v.convertToInteger().getLongValue());
+        hash = hashStart(context.runtime, hash);
+        hash = murmurCombine(hash, safeHash(context, begin).getValue());
+        hash = murmurCombine(hash, safeHash(context, end).getValue());
         hash = murmurCombine(hash, exclusiveBit << 24);
         hash = hashEnd(hash);
 
-        return runtime.newFixnum(hash);
+        return asFixnum(context, hash);
     }
 
     private static RubyString inspectValue(final ThreadContext context, IRubyObject value) {
@@ -340,34 +336,23 @@ public class RubyRange extends RubyObject {
     }
 
     private static IRubyObject inspectValueRecursive(ThreadContext context, IRubyObject state, IRubyObject obj, boolean recur) {
-        if (recur) {
-            return RubyString.newString(context.runtime, ((RubyRange) obj).isExclusive ? "(... ... ...)" : "(... .. ...)");
-        } else {
-            return inspect(context, obj);
-        }
+        return recur ?
+                newString(context, ((RubyRange) obj).isExclusive ? "(... ... ...)" : "(... .. ...)") :
+                inspect(context, obj);
     }
 
     private static final byte[] DOTDOTDOT = new byte[]{'.', '.', '.'};
 
-    @Override
-    public IRubyObject inspect() {
-        return inspect(getRuntime().getCurrentContext());
-    }
-
     @JRubyMethod(name = "inspect")
     public RubyString inspect(final ThreadContext context) {
-        RubyString i1 = isBeginless && !isEndless ? RubyString.newEmptyString(context.runtime) : inspectValue(context, begin).strDup(context.runtime);
-        RubyString i2 = isEndless && !isBeginless ? RubyString.newEmptyString(context.runtime) : inspectValue(context, end);
+        RubyString i1 = isBeginless && !isEndless ? newEmptyString(context) : dupString(context, inspectValue(context, begin));
+        RubyString i2 = isEndless && !isBeginless ? newEmptyString(context) : inspectValue(context, end);
         i1.cat(DOTDOTDOT, 0, isExclusive ? 3 : 2);
         i1.append(i2);
         return i1;
     }
 
     @Override
-    public IRubyObject to_s() {
-        return to_s(getRuntime());
-    }
-
     @JRubyMethod(name = "to_s")
     public IRubyObject to_s(final ThreadContext context) {
         return to_s(context.runtime);
@@ -382,8 +367,13 @@ public class RubyRange extends RubyObject {
     }
 
     @JRubyMethod(name = "exclude_end?")
+    public RubyBoolean exclude_end_p(ThreadContext context) {
+        return asBoolean(context, isExclusive);
+    }
+
+    @Deprecated(since = "10.0.0.0")
     public RubyBoolean exclude_end_p() {
-        return getRuntime().newBoolean(isExclusive);
+        return exclude_end_p(getRuntime().getCurrentContext());
     }
     
     @JRubyMethod(name = "eql?")
@@ -402,7 +392,7 @@ public class RubyRange extends RubyObject {
 
         RubyRange otherRange = (RubyRange) other;
 
-        return RubyBoolean.newBoolean(context, isExclusive == otherRange.isExclusive &&
+        return asBoolean(context, isExclusive == otherRange.isExclusive &&
                 invokedynamic(context, this.begin, equalityCheck, otherRange.begin).isTrue() &&
                 invokedynamic(context, this.end, equalityCheck, otherRange.end).isTrue());
     }
@@ -430,15 +420,15 @@ public class RubyRange extends RubyObject {
 
         @Override
         public void doCall(ThreadContext context, IRubyObject arg) {
-            if (iter instanceof RubyFixnum) {
-                iter = RubyFixnum.newFixnum(context.runtime, ((RubyFixnum) iter).getLongValue() - 1);
-            } else if (iter instanceof RubyInteger) {
-                iter = ((RubyInteger) iter).op_minus(context, 1);
+            if (iter instanceof RubyFixnum iterFixnum) {
+                iter = asFixnum(context, iterFixnum.getValue() - 1);
+            } else if (iter instanceof RubyInteger iterInteger) {
+                iter = iterInteger.op_minus(context, 1);
             } else {
                 iter = iter.callMethod(context, "-", one(context));
             }
             IRubyObject i = this.iter;
-            if ((i instanceof RubyInteger) && ((RubyInteger) i).isZero()) {
+            if ((i instanceof RubyInteger) && ((RubyInteger) i).isZero(context)) {
                 doYield(context, arg);
                 iter = step;
             }
@@ -466,12 +456,12 @@ public class RubyRange extends RubyObject {
         }
 
         protected void doYield(ThreadContext context, IRubyObject arg) {
-            block.yield(context, ((RubyString) arg).intern());
+            block.yield(context, ((RubyString) arg).intern(context));
         }
     }
 
-    private static boolean isZero(IRubyObject num) {
-        return num instanceof RubyFixnum && ((RubyNumeric) num).isZero();
+    private static boolean isZero(ThreadContext context, IRubyObject num) {
+        return num instanceof RubyFixnum fix && fix.isZero(context);
     }
 
     private static IRubyObject rangeLt(ThreadContext context, IRubyObject a, IRubyObject b) {
@@ -480,7 +470,7 @@ public class RubyRange extends RubyObject {
 
     // MRI: r_less
     private static int rangeLess(ThreadContext context, IRubyObject a, IRubyObject b) {
-        IRubyObject result = invokedynamic(context, a, MethodNames.OP_CMP, b);
+        IRubyObject result = sites(context).op_cmp.call(context, a, a, b);
 
         if (result.isNil()) {
             return Integer.MAX_VALUE;
@@ -513,24 +503,26 @@ public class RubyRange extends RubyObject {
             IRubyObject c;
             while ((c = rangeLe(context, v, end)) != null && c.isTrue()) {
                 callback.doCall(context, v);
-                if (isZero(c)) {
-                    break;
-                }
+                if (isZero(context, c)) break;
+
                 v = v.callMethod(context, "succ");
                 context.pollThreadEvents();
             }
         }
     }
 
+    // MRI: r_cover_p
     private boolean coverRangeP(ThreadContext context, IRubyObject val) {
         if (begin.isNil() || rangeLess(context, begin, val) <= 0) {
             int excl = isExclusive ? 1 : 0;
-            return end.isNil() || rangeLess(context, end, val) <= -excl;
+            if (end.isNil() || rangeLess(context, val, end) <= -excl)
+                return true;
         }
 
         return false;
     }
 
+    // MRI: r_cover_range_p
     private boolean coverRange(ThreadContext context, RubyRange val) {
         int cmp;
 
@@ -542,10 +534,17 @@ public class RubyRange extends RubyObject {
 
         if (!end.isNil() && valEnd.isNil()) return false;
         if (!begin.isNil() && valBeg.isNil()) return false;
-        if (!valBeg.isNil() && !valEnd.isNil() && rangeLess(context, valBeg, valEnd) > -valExcl) return false;
-        if (!valBeg.isNil() && !cover_p(context, valBeg).isTrue()) return false;
+        if (!valBeg.isNil() && !valEnd.isNil() && rangeLess(context, valBeg, valEnd) > (val.isExclusive ? -1 : 0)) return false;
+        if (!valBeg.isNil() && !coverRangeP(context, valBeg)) return false;
 
-        cmp = rangeLess(context, end, valEnd);
+        if (!valEnd.isNil() && !end.isNil()) {
+            IRubyObject rCmpEnd = sites(context).op_cmp.call(context, end, end, valEnd);
+            if (rCmpEnd.isNil()) return false;
+            cmp = RubyComparable.cmpint(context, sites(context).op_gt, sites(context).op_lt, rCmpEnd, end, valEnd);
+        } else {
+            cmp = rangeLess(context, end, valEnd);
+        }
+
         if (excl == valExcl) {
             return cmp >= 0;
         } else if (excl != 0) {
@@ -556,7 +555,7 @@ public class RubyRange extends RubyObject {
 
         IRubyObject nil = context.nil;
 
-        IRubyObject valMax = API.rb_rescue_typeerror(context, nil, () -> sites(context).max.call(context, this, val));
+        IRubyObject valMax = API.rescueTypeError(context, nil, () -> sites(context).max.call(context, this, val));
 
         if (valMax == nil) return false;
 
@@ -566,16 +565,8 @@ public class RubyRange extends RubyObject {
 
     @JRubyMethod
     public IRubyObject to_a(ThreadContext context, final Block block) {
-        final Ruby runtime = context.runtime;
-
-        if (isEndless) throw runtime.newRangeError("cannot convert endless range to an array");
-
+        if (isEndless) throw rangeError(context, "cannot convert endless range to an array");
         return RubyEnumerable.to_a(context, this);
-    }
-
-    @Deprecated
-    public IRubyObject each19(ThreadContext context, final Block block) {
-        return each(context, block);
     }
 
     @JRubyMethod(name = "each")
@@ -583,8 +574,8 @@ public class RubyRange extends RubyObject {
         if (!block.isGiven()) {
             return enumeratorizeWithSize(context, this, "each", RubyRange::size);
         }
-        if (begin instanceof RubyFixnum && isEndless) {
-            ((RubyFixnum) begin).step(context, IRubyObject.NULL_ARRAY, block);
+        if (begin instanceof RubyFixnum begFixnum && isEndless) {
+            begFixnum.step(context, IRubyObject.NULL_ARRAY, block);
         } else if (begin instanceof RubyFixnum && end instanceof RubyFixnum) {
             fixnumEach(context, block);
         } else if (begin instanceof RubySymbol && end instanceof RubySymbol) {
@@ -598,9 +589,7 @@ public class RubyRange extends RubyObject {
                     ((RubyString) tmp).uptoCommon(context, end, isExclusive, block);
                 }
             } else {
-                if (!discreteObject(context, begin)) {
-                    throw context.runtime.newTypeError("can't iterate from " + begin.getMetaClass().getName());
-                }
+                if (!discreteObject(context, begin)) throw typeError(context, "can't iterate from ", begin, "");
                 if (!end.isNil()) {
                     rangeEach(context, (ThreadContext ctx, IRubyObject arg) -> block.yield(ctx, arg));
                 } else {
@@ -626,162 +615,334 @@ public class RubyRange extends RubyObject {
         RubyInteger.fixnumUpto(context, ((RubyFixnum) begin).value, to, block);
     }
 
-    @Deprecated
-    public IRubyObject step19(ThreadContext context, IRubyObject step, Block block) {
-        return step(context, step, block);
+    // MRI: range_reverse_each
+    @JRubyMethod
+    public IRubyObject reverse_each(ThreadContext context, Block block) {
+        if (!block.isGiven()) {
+            return enumeratorizeWithSize(context, this, "reverse_each", RubyRange::reverseSize);
+        }
+
+        IRubyObject beg = this.begin;
+        IRubyObject end = this.end;
+        boolean excl = isExclusive;
+
+        if (end.isNil()) throw typeError(context, "can't iterate from ", end, "");
+
+        if (beg instanceof RubyFixnum && end instanceof RubyFixnum endFixnum) {
+            if (excl) {
+                if (endFixnum.getValue() == RubyFixnum.MIN) return this;
+
+                end = endFixnum.op_minus(context, 1);
+            }
+
+            reverseEachFixnum(context, beg, (RubyInteger) end, block);
+        } else if ((beg.isNil() || beg instanceof RubyInteger) && end instanceof RubyInteger endInteger) {
+            if (excl) {
+                endInteger = (RubyInteger) endInteger.op_minus(context, 1);
+            }
+
+            reverseEachPositiveBignum(context, beg, endInteger, block);
+            reverseEachFixnum(context, beg, endInteger, block);
+            reverseEachNegativeBignum(context, beg, endInteger, block);
+        } else {
+            return RubyEnumerable.reverse_each(context, this, block);
+        }
+
+        return this;
     }
 
-    @Deprecated
-    public IRubyObject step19(ThreadContext context, Block block) {
-        return step(context, block);
+    // MRI: range_reverse_each_fixnum_section
+    private void reverseEachFixnum(ThreadContext context, IRubyObject beg, RubyInteger end, Block block) {
+        if (beg.isNil()) {
+            beg = asFixnum(context, RubyFixnum.MIN);
+        }
+
+        reverseEachFixnum(context, (RubyInteger) beg, end, block);
+    }
+
+    // MRI: range_reverse_each_fixnum_section
+    private void reverseEachFixnum(ThreadContext context, RubyInteger beg, RubyInteger end, Block block) {
+        assert (!end.isNil());
+
+        if (!(beg instanceof RubyFixnum)) {
+            if (!beg.isNil() && bignumPositive(context, beg)) return;
+
+            beg = asFixnum(context, RubyFixnum.MIN);
+        }
+
+        if (!(end instanceof RubyFixnum)) {
+            if (bignumNegative(context, end)) return;
+
+            end = asFixnum(context, RubyFixnum.MAX);
+        }
+
+        long b = ((RubyFixnum) beg).getValue();
+        long e = ((RubyFixnum) end).getValue();
+
+        for (long i = e; i >= b; --i) {
+            block.yieldSpecific(context, asFixnum(context, i));
+            // avoid underflow
+            if (i == b) break;
+        }
+    }
+
+    // MRI: range_reverse_each_positive_bignum_section
+    private void reverseEachPositiveBignum(ThreadContext context, IRubyObject beg, RubyInteger end, Block block) {
+        assert (!end.isNil());
+
+        if (end instanceof RubyFixnum || bignumNegative(context, end)) return;
+
+        if (beg.isNil() || beg instanceof RubyFixnum || bignumNegative(context, beg)) {
+            beg = RubyBignum.newBignum(context.runtime, RubyBignum.LONG_MAX_PLUS_ONE);
+        }
+
+        reverseEachBignum(context, (RubyInteger) beg, end, block);
+    }
+
+    // MRI: range_reverse_each_negative_bignum_section
+    private void reverseEachNegativeBignum(ThreadContext context, IRubyObject beg, RubyInteger end, Block block) {
+        assert (!end.isNil());
+
+        if (end instanceof RubyFixnum || bignumPositive(context, end)) {
+            end = RubyBignum.newBignum(context.runtime, RubyBignum.LONG_MIN_MINUS_ONE);
+        }
+
+        if (beg.isNil()) {
+            reverseEachBignumBeginless(context, end, block);
+        }
+
+        if (beg instanceof RubyFixnum || bignumPositive(context, beg)) return;
+
+        reverseEachBignum(context, (RubyInteger) beg, end, block);
+    }
+
+    // MRI: range_reverse_each_bignum
+    private void reverseEachBignum(ThreadContext context, RubyInteger beg, RubyInteger end, Block block) {
+        assert (bignumPositive(context, beg) == bignumPositive(context, end));
+
+        RubyFixnum one = asFixnum(context, 1);
+        RubyFixnum zero = asFixnum(context, 0);
+
+        IRubyObject c;
+        while (!(c = beg.op_cmp(context, end)).equals(one)) {
+            block.yieldSpecific(context, end);
+            if (c == zero) break;
+            end = (RubyInteger) end.op_minus(context, one);
+        }
+    }
+
+    // MRI: range_reverse_each_bignum_beginless
+    private void reverseEachBignumBeginless(ThreadContext context, RubyInteger end, Block block) {
+        assert (bignumNegative(context, end));
+
+        for (; ; end = (RubyInteger) end.op_minus(context, 1)) {
+            block.yieldSpecific(context, end);
+        }
+    }
+
+    // MRI: RBIGNUM_NEGATIVE
+    private static boolean bignumNegative(ThreadContext context, IRubyObject end) {
+        assert (end instanceof RubyBignum);
+        RubyBignum bigEnd = (RubyBignum) end;
+        return bigEnd.signum(context) == -1;
+    }
+
+    // MRI: RBIGNUM_POSITIVE
+    private static boolean bignumPositive(ThreadContext context, IRubyObject num) {
+        assert (num instanceof RubyBignum);
+        RubyBignum bigNum = (RubyBignum) num;
+        return bigNum.signum(context) == 1;
     }
 
     @JRubyMethod(name = "step")
     public IRubyObject step(final ThreadContext context, final Block block) {
-        return block.isGiven() ? stepCommon(context, RubyFixnum.one(context.runtime), block) : step(context, context.runtime.getNil(), block);
+        return stepCommon(context, UNDEF, block);
     }
 
     @JRubyMethod(name = "step")
     public IRubyObject step(final ThreadContext context, IRubyObject step, final Block block) {
-        String method = "step";
-        if (!block.isGiven()) {
-            return stepEnumeratorize(context, step, method);
-        }
-
-        step = checkStepDomain(context, step, method);
-
         return stepCommon(context, step, block);
     }
 
-    private IRubyObject checkStepDomain(ThreadContext context, IRubyObject step, String method) {
-        if (!(step instanceof RubyNumeric)) {
-            step = step.convertToInteger("to_int");
-        }
-        if (((RubyNumeric) step).isNegative()) {
-            throw context.runtime.newArgumentError(method + " can't be negative");
-        }
-        if (((RubyNumeric) step).isZero()) {
-            throw context.runtime.newArgumentError(method + " can't be 0");
-        }
-        return step;
-    }
-
-    private IRubyObject stepEnumeratorize(ThreadContext context, IRubyObject step, String method) {
-        if (!step.isNil() && !(step instanceof RubyNumeric)) {
-            step = step.convertToInteger("to_int");
-        }
-        if ((step instanceof RubyNumeric) && ((RubyNumeric) step).isZero()) {
-            throw context.runtime.newArgumentError("step can't be 0");
+    private IRubyObject stepEnumeratorize(ThreadContext context, IRubyObject stepArg, IRubyObject step, String method) {
+        IRubyObject[] argc;
+        if (stepArg == UNDEF) {
+            argc = IRubyObject.NULL_ARRAY;
+        } else {
+            argc = new IRubyObject[]{stepArg};
         }
 
-        if ((begin instanceof RubyNumeric && (end.isNil() || end instanceof RubyNumeric)) ||
-                (end instanceof RubyNumeric && begin.isNil())) {
-
-            return RubyArithmeticSequence.newArithmeticSequence(
-                    context,
-                    this,
-                    method,
-                    !step.isNil() ? new IRubyObject[]{step} : null,
-                    begin,
-                    end,
-                    !step.isNil() ? step : RubyFixnum.one(context.runtime),
-                    isExclusive ? context.tru : context.fals);
+        if (step instanceof RubyNumeric && (begin instanceof RubyNumeric && (end.isNil() || end instanceof RubyNumeric)) || (begin.isNil() && end instanceof RubyNumeric)) {
+            return RubyArithmeticSequence.newArithmeticSequence(context, this, method, argc, begin, end, step, isExclusive ? context.tru : context.fals);
         }
 
-        if (!step.isNil()) {
-            return enumeratorizeWithSize(context, this, method, new IRubyObject[]{step}, RubyRange::stepSize);
+        // ...but generic Enumerator from beginless range is useless and probably an error.
+        if (begin.isNil()) {
+            throw argumentError(context, "#step for non-numeric beginless ranges is meaningless");
         }
 
-        return enumeratorizeWithSize(context, this, method, RubyRange::stepSize);
+        return enumeratorize(context.runtime, this, method, argc);
     }
 
     @JRubyMethod(name = "%")
     public IRubyObject op_mod(final ThreadContext context, IRubyObject step) {
-        return stepEnumeratorize(context, step, "%");
+        return stepEnumeratorize(context, step, step, "%");
     }
 
-    private IRubyObject stepCommon(ThreadContext context, IRubyObject step, Block block) {
-        Ruby runtime = context.runtime;
-        if (begin instanceof RubyFixnum && end.isNil() && step instanceof RubyFixnum) {
-            long i = begin.convertToInteger().getLongValue();
-            long unit = step.convertToInteger().getLongValue();
-            while (i < Long.MAX_VALUE) {
-                block.yield(context, RubyFixnum.newFixnum(context.runtime, i));
-                i += unit;
-            }
-            IRubyObject b = RubyFixnum.newFixnum(context.runtime, i);
-            for (;; b = ((RubyInteger) b).op_plus(context, step)) {
-                block.yield(context, b);
-            }
-        } else if (begin instanceof RubyFixnum && end instanceof RubyFixnum && step instanceof RubyFixnum) {
-            fixnumStep(context, runtime, ((RubyFixnum) step).getLongValue(), block);
-        } else if (begin instanceof RubyFloat || end instanceof RubyFloat || step instanceof RubyFloat) {
-            RubyNumeric.floatStep(context, runtime, begin, end, step, isExclusive, isEndless, block);
-        } else if (begin instanceof RubySymbol && (end.isNil() || end instanceof RubySymbol)) { /* symbols are special */
-            RubyString b = begin.asString();
-            SymbolStepBlockCallBack callback = new SymbolStepBlockCallBack(block, RubyFixnum.one(runtime), step);
-            Block blockCallback = CallBlock.newCallClosure(context, this, Signature.ONE_ARGUMENT, callback);
-            if (end.isNil()) {
-                b.uptoEndless(context, blockCallback);
-            } else {
-                b.uptoCommon(context, end.asString(), isExclusive, blockCallback);
-            }
-        } else if (begin instanceof RubyNumeric
-                || !TypeConverter.checkToInteger(runtime, begin, "to_int").isNil()
-                || !TypeConverter.checkToInteger(runtime, end, "to_int").isNil()) {
-            numericStep(context, runtime, step, block);
+    private IRubyObject stepCommon(ThreadContext context, IRubyObject stepArg, Block block) {
+        IRubyObject b = begin;
+        IRubyObject e = end;
+
+        boolean beginIsNumeric = b instanceof RubyNumeric;
+        boolean endIsNumeric = e instanceof RubyNumeric;
+        // For backward compatibility reasons (conforming to behavior before 3.4), String/Symbol
+        // supports both old behavior ('a'..).step(1) and new behavior ('a'..).step('a')
+        // Hence the additional conversion/additional checks.
+        IRubyObject strBegin = b.checkStringType();
+        IRubyObject symBegin = b instanceof RubySymbol symbol ? symbol.to_s(context) : context.nil;
+
+        IRubyObject step;
+        if (stepArg != UNDEF) {
+            step = stepArg;
         } else {
-            IRubyObject tmp = begin.checkStringType();
-            if (!tmp.isNil()) {
-                StepBlockCallBack callback = new StepBlockCallBack(block, RubyFixnum.one(runtime), step);
-                Block blockCallback = CallBlock.newCallClosure(context, this, Signature.ONE_ARGUMENT, callback);
-                if (end.isNil()) {
-                    ((RubyString) tmp).uptoEndless(context, blockCallback);
-                } else {
-                    ((RubyString) tmp).uptoCommon(context, end, isExclusive, blockCallback);
-                }
+            if (beginIsNumeric || !strBegin.isNil() || !symBegin.isNil() || (b.isNil() && endIsNumeric)) {
+                step = asFixnum(context, 1);
             } else {
-                if (!begin.respondsTo("succ")) {
-                    throw runtime.newTypeError("can't iterate from " + begin.getMetaClass().getName());
+                throw argumentError(context, "step is required for non-numeric ranges");
+            }
+        }
+
+        boolean stepIsNumeric = step instanceof RubyNumeric;
+
+        if (stepIsNumeric && beginIsNumeric && step.op_eqq(context, asFixnum(context, 0)).isTrue()) {
+            throw argumentError(context, "step can't be 0");
+        }
+
+        if (!block.isGiven()) {
+            return stepEnumeratorize(context, stepArg, step, "step");
+        }
+
+        if (b.isNil()) {
+            throw argumentError(context, "#step iteration for beginless ranges is meaningless");
+        }
+
+        IRubyObject v = b;
+        int c, dir;
+
+        if (b instanceof RubyFixnum && e.isNil() && step instanceof RubyFixnum) {
+            fixnumEndlessStep(context, step, block);
+        } else if (b instanceof RubyFixnum bb && e instanceof RubyFixnum ee && step instanceof RubyFixnum ss) {
+            fixnumStep(context, bb, ee, ss, block);
+        } else {
+            boolean excl = isExclusive;
+            if (beginIsNumeric && stepIsNumeric && floatStep(context, b, e, step, excl, isEndless, block)) {
+                /* done */
+            } else if (!strBegin.isNil() && step instanceof RubyFixnum) {
+                // backwards compatibility behavior for String only, when no step/Integer step is passed
+                // See discussion in https://bugs.ruby-lang.org/issues/18368
+                stringStep(context, step, block, (RubyString) strBegin);
+            } else if (!symBegin.isNil() && step instanceof RubyFixnum) {
+                // same as above: backward compatibility for symbols
+                symbolStep(context, step, block, (RubyString) symBegin);
+            } else if (e.isNil()) {
+                for (; ; v = v.callMethod(context, "+", step)) {
+                    block.yield(context, v);
                 }
-                // range_each_func(range, step_i, b, e, args);
-                rangeEach(context, new StepBlockCallBack(block, RubyFixnum.one(runtime), step));
+            } else if (beginIsNumeric && stepIsNumeric && rangeLess(context, step, asFixnum(context, 0)) < 0) {
+                // iterate backwards, for consistency with ArithmeticSequence
+                if (excl) {
+                    for (; rangeLess(context, e, v) < 0; v = v.callMethod(context, "+", step)) {
+                        block.yield(context, v);
+                    }
+                } else {
+                    for (; (c = rangeLess(context, e, v)) <= 0; v = v.callMethod(context, "+", step)) {
+                        block.yield(context, v);
+                        if (c == 0) break;
+                    }
+                }
+            } else if ((dir = rangeLess(context, b, e)) == 0) {
+                if (!excl) {
+                    block.yield(context, v);
+                }
+            } else if (rangeLess(context, b, b.callMethod(context, "+", step)) == dir) {
+                // Direction of the comparison. We use it as a comparison operator in cycle:
+                // if begin < end, the cycle performs while value < end (iterating forward)
+                // if begin > end, the cycle performs while value > end (iterating backward with
+                // a negative step)
+                // One preliminary addition to check the step moves iteration in the same direction as
+                // from begin to end; otherwise, the iteration should be empty.
+                if (excl) {
+                    for (; rangeLess(context, v, e) == dir; v = v.callMethod(context, "+", step)) {
+                        block.yield(context, v);
+                    }
+                } else {
+                    for (; (c = rangeLess(context, v, e)) == dir || c == 0; v = v.callMethod(context, "+", step)) {
+                        block.yield(context, v);
+                        if (c == 0) break;
+                    }
+                }
             }
         }
         return this;
     }
 
-    private void fixnumStep(ThreadContext context, Ruby runtime, long step, Block block) {
-        // We must avoid integer overflows.
-        // Any method calling this method must ensure that "step" is greater than 0.
-        long to = ((RubyFixnum) end).getLongValue();
-        if (isExclusive) {
-            if (to == Long.MIN_VALUE) {
-                return;
-            }
-            to--;
+    private void fixnumEndlessStep(ThreadContext context, IRubyObject step, Block block) {
+        long i = toLong(context, begin);
+        long unit = toLong(context, step);
+        // avoid overflow
+        while (i <= Long.MAX_VALUE - unit) {
+            block.yield(context, asFixnum(context, i));
+            i += unit;
         }
-        long tov = Long.MAX_VALUE - step;
-        if (to < tov) {
-            tov = to;
-        }
-        long i;
-        for (i = ((RubyFixnum) begin).getLongValue(); i <= tov; i += step) {
-            block.yield(context, RubyFixnum.newFixnum(runtime, i));
-        }
-        if (i <= to) {
-            block.yield(context, RubyFixnum.newFixnum(runtime, i));
+        IRubyObject b = asFixnum(context, i);
+        for (;; b = ((RubyInteger) b).op_plus(context, step)) {
+            block.yield(context, b);
         }
     }
 
-    private void numericStep(ThreadContext context, Ruby runtime, IRubyObject step, Block block) {
-        final String method = isExclusive ? "<" : "<=";
-        IRubyObject beg = begin;
-        long i = 0;
-        while (beg.callMethod(context, method, end).isTrue()) {
-            block.yield(context, beg);
-            i++;
-            beg = begin.callMethod(context, "+", RubyFixnum.newFixnum(runtime, i).callMethod(context, "*", step));
+    private void fixnumStep(ThreadContext context, RubyFixnum b, RubyFixnum e, RubyFixnum s, Block block) {
+        long end = e.getValue();
+        long unit = s.getValue();
+        // avoid overflow
+        long shortEnd = end - unit;
+        if (unit < 0) {
+            long i = b.getValue();
+            if (i > end) block.yield(context, asFixnum(context, i));
+            while (i > shortEnd) {
+                i += unit;
+                block.yield(context, asFixnum(context, i));
+            }
+            if (!isExclusive && i == shortEnd)
+                block.yield(context, asFixnum(context, i + unit));
+        } else {
+            long i = b.getValue();
+            if (i < end) block.yield(context, asFixnum(context, i));
+            while (i < shortEnd) {
+                i += unit;
+                block.yield(context, asFixnum(context, i));
+            }
+            if (!isExclusive && i == shortEnd)
+                block.yield(context, asFixnum(context, i + unit));
+        }
+    }
+
+    private void stringStep(ThreadContext context, IRubyObject step, Block block, RubyString strBegin) {
+        StepBlockCallBack callback = new StepBlockCallBack(block, RubyFixnum.one(context.runtime), step);
+        Block blockCallback = CallBlock.newCallClosure(context, this, Signature.ONE_ARGUMENT, callback);
+        if (end.isNil()) {
+            strBegin.uptoEndless(context, blockCallback);
+        } else {
+            strBegin.uptoCommon(context, end, isExclusive, blockCallback);
+        }
+    }
+
+    private void symbolStep(ThreadContext context, IRubyObject step, Block block, RubyString symBegin) {
+        SymbolStepBlockCallBack callback = new SymbolStepBlockCallBack(block, RubyFixnum.one(context.runtime), step);
+        Block blockCallback = CallBlock.newCallClosure(context, this, Signature.ONE_ARGUMENT, callback);
+        if (end.isNil()) {
+            symBegin.uptoEndless(context, blockCallback);
+        } else {
+            symBegin.uptoCommon(context, end.asString(), isExclusive, blockCallback);
         }
     }
 
@@ -795,41 +956,72 @@ public class RubyRange extends RubyObject {
     }
 
     /**
+     * A size method for reverse_each suitable for lambda method reference implementation of {@link SizeFn#size(ThreadContext, IRubyObject, IRubyObject[])}
+     *
+     * @see SizeFn#size(ThreadContext, IRubyObject, IRubyObject[])
+     */
+    private static IRubyObject reverseSize(ThreadContext context, RubyRange recv, IRubyObject[] args) {
+        IRubyObject e = recv.end;
+        if (e.isNil()) {
+            cantIterateFrom(context, e);
+        }
+
+        IRubyObject b = recv.begin;
+        if (b instanceof RubyInteger) {
+            if (e instanceof RubyNumeric) {
+                return intervalStepSize(context, b, e, asFixnum(context, 1), recv.isExclusive);
+            }
+            else {
+                cantIterateFrom(context, e);
+            }
+        }
+
+        if (b.isNil()) {
+            if (e instanceof RubyInteger) {
+                return asFloat(context, Double.POSITIVE_INFINITY);
+            }
+            else {
+                cantIterateFrom(context, e);
+            }
+        }
+
+        if (!discreteObject(context, b)) {
+            cantIterateFrom(context, e);
+        }
+
+        return context.nil;
+    }
+
+    private static void cantIterateFrom(ThreadContext context, IRubyObject e) {
+        throw typeError(context, "can't iterate from " + e);
+    }
+
+    /**
      * A step size method suitable for lambda method reference implementation of {@link SizeFn#size(ThreadContext, IRubyObject, IRubyObject[])}
      *
      * @see SizeFn#size(ThreadContext, IRubyObject, IRubyObject[])
      */
     private static IRubyObject stepSize(ThreadContext context, RubyRange self, IRubyObject[] args) {
-        Ruby runtime = context.runtime;
         IRubyObject begin = self.begin;
         IRubyObject end = self.end;
         IRubyObject step;
 
         if (args != null && args.length > 0) {
             step = args[0];
-            if (!(step instanceof RubyNumeric)) {
-                step.convertToInteger();
-            }
+            if (!(step instanceof RubyNumeric)) step = step.convertToInteger();
         } else {
-            step = RubyFixnum.one(runtime);
+            step = asFixnum(context, 1);
         }
 
-        if (step.callMethod(context, "<", RubyFixnum.zero(runtime)).isTrue()) {
-            throw runtime.newArgumentError("step can't be negative");
-        } else if (!step.callMethod(context, ">", RubyFixnum.zero(runtime)).isTrue()) {
-            throw runtime.newArgumentError("step can't be 0");
-        }
+        var zero = asFixnum(context, 0);
+        if (step.callMethod(context, "<", zero).isTrue()) throw argumentError(context, "step can't be negative");
+        if (!step.callMethod(context, ">", zero).isTrue()) throw argumentError(context, "step can't be 0");
 
         if (begin instanceof RubyNumeric && end instanceof RubyNumeric) {
             return intervalStepSize(context, begin, end, step, self.isExclusive);
         }
 
         return context.nil;
-    }
-
-    @Deprecated
-    public IRubyObject include_p19(ThreadContext context, IRubyObject obj) {
-        return include_p(context, obj);
     }
 
     // framed for invokeSuper
@@ -844,38 +1036,48 @@ public class RubyRange extends RubyObject {
     private IRubyObject includeCommon(ThreadContext context, final IRubyObject val, boolean useStringCover) {
         final Ruby runtime = context.runtime;
 
-        boolean iterable = begin instanceof RubyNumeric || end instanceof RubyNumeric ||
+        boolean iterable = begin instanceof RubyFixnum || end instanceof RubyFixnum ||
                 linearObject(context, begin) || linearObject(context, end);
 
         JavaSites.RangeSites sites = sites(context);
         JavaSites.CheckedSites to_int_checked = sites.to_int_checked;
-        if (iterable
-                || !TypeConverter.convertToTypeWithCheck(context, begin, runtime.getInteger(), to_int_checked).isNil()
-                || !TypeConverter.convertToTypeWithCheck(context, end, runtime.getInteger(), to_int_checked).isNil()) {
-            return RubyBoolean.newBoolean(context, rangeIncludes(context, val));
-        } else if ((begin instanceof RubyString) || (end instanceof RubyString)) {
-            if ((begin instanceof RubyString) && (end instanceof RubyString)) {
-                if (useStringCover) {
-                    return cover_p(context, val);
-                } else {
-                    return RubyString.includeRange(context, (RubyString) begin, (RubyString) end, val, isExclusive);
-                }
-            } else if (begin.isNil()) {
-                IRubyObject r = sites.op_cmp.call(context, val, val, end);
-                if (r.isNil()) return context.fals;
-                if (RubyComparable.cmpint(context, sites.op_gt, sites.op_lt, r, val, end) <= 0) return context.tru;
-                return context.fals;
-            } else if (end.isNil()) {
-                IRubyObject r = sites.op_cmp.call(context, begin, begin, val);
-                if (r.isNil()) return context.fals;
-                if (RubyComparable.cmpint(context, sites.op_gt, sites.op_lt, r, begin, val) <= 0) return context.tru;
-                return context.fals;
-            }
+        if (iterable || rangeIntegerEdge(context, runtime.getInteger(), to_int_checked)) {
+            return asBoolean(context, rangeIncludes(context, val));
+        } else if (rangeString()) {
+            return RubyString.includeRange(context, (RubyString) begin, (RubyString) end, val, isExclusive);
+        }
+
+        return rangeIncludeFallback(context, val);
+    }
+
+    // MRI: range_include_fallback
+    private IRubyObject rangeIncludeFallback(ThreadContext context, IRubyObject val) {
+        boolean beginless = begin.isNil();
+        boolean endless = end.isNil();
+
+        if (beginless && endless) {
+            if (linearObject(context, val)) return context.tru;
+        }
+
+        if (beginless || endless) {
+            throw typeError(context, "cannot determine inclusion in beginless/endless ranges");
         }
 
         return UNDEF;
     }
 
+    // MRI: range_string_p
+    private boolean rangeString() {
+        return begin instanceof RubyString && end instanceof RubyString;
+    }
+
+    // MRI: range_integer_edge_p
+    private boolean rangeIntegerEdge(ThreadContext context, RubyClass Integer, JavaSites.CheckedSites to_int_checked) {
+        return !TypeConverter.convertToTypeWithCheck(context, begin, Integer, to_int_checked).isNil()
+                || !TypeConverter.convertToTypeWithCheck(context, end, Integer, to_int_checked).isNil();
+    }
+
+    // MRI: discrete_object_p
     private static boolean discreteObject(ThreadContext context, IRubyObject obj) {
         return sites(context).respond_to_succ.respondsTo(context, obj, obj, false);
     }
@@ -891,18 +1093,13 @@ public class RubyRange extends RubyObject {
 
     @JRubyMethod(name = "===")
     public IRubyObject eqq_p(ThreadContext context, IRubyObject obj) {
-        IRubyObject result = includeCommon(context, obj, true);
-        if (result != UNDEF) return result;
-        return RubyBoolean.newBoolean(context, rangeIncludes(context, obj));
+        return asBoolean(context, coverRangeP(context, obj));
     }
 
     @JRubyMethod(name = "cover?")
     public RubyBoolean cover_p(ThreadContext context, IRubyObject obj) {
-        if (obj instanceof RubyRange) {
-            return RubyBoolean.newBoolean(context, coverRange(context, (RubyRange) obj));
-        }
-
-        return RubyBoolean.newBoolean(context, rangeIncludes(context, obj));
+        return asBoolean(context,
+                obj instanceof RubyRange range ? coverRange(context, range) : coverRangeP(context, obj));
     }
 
     // MRI: r_cover_p
@@ -925,63 +1122,43 @@ public class RubyRange extends RubyObject {
 
     @JRubyMethod(frame = true)
     public IRubyObject min(ThreadContext context, IRubyObject arg, Block block) {
-        if (begin.isNil()) {
-            throw context.runtime.newRangeError("cannot get the minimum of beginless range");
-        }
+        if (begin.isNil()) throw rangeError(context, "cannot get the minimum of beginless range");
 
         if (block.isGiven()) {
-            if (end.isNil()) {
-                throw context.runtime.newRangeError("cannot get the minimum of endless range with custom comparison method");
-            }
+            if (end.isNil()) throw rangeError(context, "cannot get the minimum of endless range with custom comparison method");
 
             return arg != null ? Helpers.invokeSuper(context, this, arg, block) : Helpers.invokeSuper(context, this, block);
-        } else if (arg != null) {
-            return first(context, arg);
-        } else {
-            int cmp = isEndless ? -1 : RubyComparable.cmpint(context, invokedynamic(context, begin, MethodNames.OP_CMP, end), begin, end);
-            if (cmp > 0 || (cmp == 0 && isExclusive)) {
-                return context.nil;
-            }
-
-            return begin;
         }
+        if (arg != null) return first(context, arg);
+
+        int cmp = isEndless ? -1 : RubyComparable.cmpint(context, invokedynamic(context, begin, MethodNames.OP_CMP, end), begin, end);
+        return cmp > 0 || cmp == 0 && isExclusive ? context.nil : begin;
     }
 
     @JRubyMethod(frame = true)
     public IRubyObject max(ThreadContext context, Block block) {
-        boolean isNumeric = end instanceof RubyNumeric;
+        if (isEndless) throw rangeError(context, "cannot get the maximum of endless range");
 
-        if (isEndless) throw context.runtime.newRangeError("cannot get the maximum of endless range");
-
-        if (block.isGiven() || (isExclusive && !isNumeric)) {
+        if (block.isGiven() || isExclusive && !(end instanceof RubyNumeric)) {
             if (isBeginless) {
-                throw context.runtime.newRangeError("cannot get the maximum of beginless range with custom comparison method");
+                throw rangeError(context, "cannot get the maximum of beginless range with custom comparison method");
             }
             return Helpers.invokeSuper(context, this, block);
         }
 
         int cmp = isBeginless ? -1 : RubyComparable.cmpint(context, invokedynamic(context, begin, MethodNames.OP_CMP, end), begin, end);
-        if (cmp > 0) {
-            return context.nil;
-        }
+        if (cmp > 0) return context.nil;
+
         if (isExclusive) {
-            if (!(end instanceof RubyInteger)) {
-                throw context.runtime.newTypeError("cannot exclude non Integer end value");
-            }
+            if (!(end instanceof RubyInteger)) throw typeError(context, "cannot exclude non Integer end value");
 
-            if (cmp == 0) {
-                return context.nil;
-            }
+            if (cmp == 0) return context.nil;
 
-            if (!(begin instanceof RubyInteger)) {
-                throw context.runtime.newTypeError("cannot exclude end value with non Integer begin value");
-            }
+            if (!(begin instanceof RubyInteger)) throw typeError(context, "cannot exclude end value with non Integer begin value");
 
-            if (end instanceof RubyFixnum) {
-                return RubyFixnum.newFixnum(context.runtime, ((RubyFixnum) end).getLongValue() - 1);
-            }
-
-            return end.callMethod(context, "-", RubyFixnum.one(context.runtime));
+            return end instanceof RubyFixnum fixnum ?
+                    asFixnum(context, fixnum.getValue() - 1) :
+                    end.callMethod(context, "-", RubyFixnum.one(context.runtime));
         }
 
         return end;
@@ -989,7 +1166,7 @@ public class RubyRange extends RubyObject {
 
     @JRubyMethod(frame = true)
     public IRubyObject max(ThreadContext context, IRubyObject arg, Block block) {
-        if (isEndless) throw context.runtime.newRangeError("cannot get the maximum element of endless range");
+        if (isEndless) throw rangeError(context, "cannot get the maximum element of endless range");
         return Helpers.invokeSuper(context, this, arg, block);
     }
 
@@ -998,24 +1175,22 @@ public class RubyRange extends RubyObject {
         return first(context, null);
     }
 
-    @JRubyMethod
+    @JRubyMethod @JRubyAPI
     public IRubyObject begin(ThreadContext context) {
         return begin;
     }
 
     @JRubyMethod
     public IRubyObject first(ThreadContext context, IRubyObject arg) {
-        if (isBeginless) throw context.runtime.newRangeError("cannot get the first element of beginless range");
+        if (isBeginless) throw rangeError(context, "cannot get the first element of beginless range");
 
         if (arg == null) return begin;
 
-        final Ruby runtime = context.runtime;
-        final int num = RubyNumeric.num2int(arg);
-        if (num < 0) {
-            throw context.runtime.newArgumentError("negative array size (or size too big)");
-        }
+        final int num = toInt(context, arg);
+        if (num < 0) throw argumentError(context, "negative array size (or size too big)");
+
         // TODO (CON): this could be packed if we know there are at least num elements in range
-        final RubyArray result = runtime.newArray(num);
+        final var result = allocArray(context, num);
         try {
             RubyEnumerable.callEach(context, sites(context).each, this, Signature.ONE_ARGUMENT, new BlockCallback() {
                 int n = num;
@@ -1026,10 +1201,9 @@ public class RubyRange extends RubyObject {
 
                 @Override
                 public IRubyObject call(ThreadContext ctx, IRubyObject larg, Block blk) {
-                    if (n-- <= 0) {
-                        throw JumpException.SPECIAL_JUMP;
-                    }
-                    result.append(larg);
+                    if (n-- <= 0) throw JumpException.SPECIAL_JUMP;
+
+                    result.append(context, larg);
                     return ctx.nil;
                 }
             });
@@ -1040,75 +1214,87 @@ public class RubyRange extends RubyObject {
 
     @JRubyMethod
     public IRubyObject count(ThreadContext context, Block block) {
-        if (isBeginless || isEndless) return RubyFloat.newFloat(context.runtime, RubyFloat.INFINITY);
+        if (!block.isGiven()) {
+            if (isBeginless || isEndless) return asFloat(context, RubyFloat.INFINITY);
+
+            if (begin instanceof RubyInteger) {
+                IRubyObject size = size(context);
+                if (!size.isNil()) return size;
+            }
+
+            // fall back on Enumerable logic for other cases
+        }
 
         return RubyEnumerable.count(context, this, block);
+    }
+
+    @JRubyMethod
+    public IRubyObject count(ThreadContext context, IRubyObject arg, Block block) {
+        return RubyEnumerable.count(context, this, arg, block);
     }
 
     @JRubyMethod
     public IRubyObject minmax(ThreadContext context, Block block) {
         if (block.isGiven()) return Helpers.invokeSuper(context, this, context.runtime.getRange(), "minmax", NULL_ARRAY, block);
 
-        return RubyArray.newArray(context.runtime, callMethod("min"), callMethod("max"));
+        return newArray(context, callMethod("min"), callMethod("max"));
     }
 
     @JRubyMethod
     public IRubyObject last(ThreadContext context) {
-        if (isEndless) throw context.runtime.newRangeError("cannot get the last element of endless range");
+        if (isEndless) throw rangeError(context, "cannot get the last element of endless range");
         return end;
     }
 
-    @JRubyMethod
+    @JRubyMethod @JRubyAPI
     public IRubyObject end(ThreadContext context) {
         return end;
     }
 
     @JRubyMethod
     public IRubyObject last(ThreadContext context, IRubyObject arg) {
-        if (isEndless) throw context.runtime.newRangeError("cannot get the last element of endless range");
+        if (isEndless) throw rangeError(context, "cannot get the last element of endless range");
 
-        if ((begin instanceof RubyInteger) && (end instanceof RubyInteger)
-            && this.getMetaClass().checkMethodBasicDefinition("each")) {
+        if (begin instanceof RubyInteger && end instanceof RubyInteger
+            && getMetaClass().checkMethodBasicDefinition("each")) {
                 return intRangeLast(context, arg);
         }
 
-        return ((RubyArray) RubyKernel.new_array(context, this, this)).last(arg);
+        return ((RubyArray) RubyKernel.new_array(context, this, this)).last(context, arg);
     }
 
     // MRI rb_int_range_last
     private RubyArray intRangeLast(ThreadContext context, IRubyObject arg) {
-        IRubyObject one = RubyInteger.int2fix(context.runtime, 1);
-        IRubyObject len1, len, nv, b;
-
-        len1 = ((RubyInteger)end).op_minus(context, begin);
+        RubyFixnum one = asFixnum(context, 1);
+        RubyInteger e = (RubyInteger) end;
+        RubyInteger len;
+        RubyInteger len1 = (RubyInteger) e.op_minus(context, begin);
 
         if (isExclusive) {
-            end = ((RubyInteger)end).op_minus(context, one);
+            e = (RubyInteger) e.op_minus(context, one);
             len = len1;
         } else {
-            len = ((RubyInteger)len1).op_plus(context, one);
+            len = (RubyInteger) len1.op_plus(context, one);
         }
 
-        if (((RubyInteger)len).isZero() || Numeric.f_negative_p(context, (RubyInteger)len)) {
-            return RubyArray.newEmptyArray(context.runtime);
+        if (len.isZero(context) || Numeric.f_negative_p(context, len)) {
+            return newEmptyArray(context);
         }
 
-        long n = RubyNumeric.num2long(arg);
-        if (n < 0) {
-            throw context.runtime.newArgumentError("negative array size");
-        }
+        long n = toLong(context, arg);
+        if (n < 0) throw argumentError(context, "negative array size");
 
-        nv = RubyInteger.int2fix(context.runtime, n);
+        RubyInteger nv = asFixnum(context, n);
         if (Numeric.f_gt_p(context, nv, len)) {
              nv = len;
-             n = RubyNumeric.num2long(nv);
+             n = toLong(context, nv);
         }
 
-        RubyArray array = RubyArray.newArray(context.runtime, n);
-        b = ((RubyInteger)end).op_minus(context, nv);
+        RubyArray<?> array = allocArray(context, n);
+        RubyInteger b = (RubyInteger) e.op_minus(context, nv);
         while (n > 0) {
-            b = ((RubyInteger)b).op_plus(context, one);
-            array.push(b);
+            b = (RubyInteger) b.op_plus(context, one);
+            array.append(context, b);
             n--;
         }
 
@@ -1117,18 +1303,22 @@ public class RubyRange extends RubyObject {
 
     @JRubyMethod
     public IRubyObject size(ThreadContext context) {
-        if (begin instanceof RubyNumeric) {
+        if (begin instanceof RubyInteger) {
             if (end instanceof RubyNumeric) {
-                return RubyNumeric.intervalStepSize(context, begin, end, RubyFixnum.one(context.runtime), isExclusive);
+                return intervalStepSize(context, begin, end, RubyFixnum.one(context.runtime), isExclusive);
             }
-            if (end.isNil()) {
-                return dbl2num(context.runtime, Double.POSITIVE_INFINITY);
-            }
-        } else if (begin.isNil()) {
-            return dbl2num(context.runtime, Double.POSITIVE_INFINITY);
+            if (end.isNil()) return asFloat(context, Double.POSITIVE_INFINITY);
+        }
+
+        if (!discreteObject(begin)) {
+            throw typeError(context, str(context.runtime, "can't iterate from ", types(context, begin.getMetaClass())));
         }
 
         return context.nil;
+    }
+
+    private boolean discreteObject(IRubyObject object) {
+        return object.respondsTo("succ");
     }
 
     public final boolean isExcludeEnd() {
@@ -1137,23 +1327,43 @@ public class RubyRange extends RubyObject {
 
     private static final ObjectMarshal RANGE_MARSHAL = new ObjectMarshal() {
         @Override
+        @Deprecated(since = "10.0.0.0", forRemoval = true)
+        @SuppressWarnings("removal")
         public void marshalTo(Ruby runtime, Object obj, RubyClass type,
-                MarshalStream marshalStream) throws IOException {
+                              org.jruby.runtime.marshal.MarshalStream marshalStream) throws IOException {
             RubyRange range = (RubyRange) obj;
+            var context = runtime.getCurrentContext();
 
-            marshalStream.registerLinkTarget(range);
+            marshalStream.registerLinkTarget(context, range);
             List<Variable<Object>> attrs = range.getMarshalVariableList();
 
-            attrs.add(new VariableEntry<Object>("excl", range.isExclusive ? runtime.getTrue() : runtime.getFalse()));
-            attrs.add(new VariableEntry<Object>("begin", range.begin));
-            attrs.add(new VariableEntry<Object>("end", range.end));
+            attrs.add(new VariableEntry<>("excl", range.isExclusive ? context.tru : context.fals));
+            attrs.add(new VariableEntry<>("begin", range.begin));
+            attrs.add(new VariableEntry<>("end", range.end));
 
             marshalStream.dumpVariables(attrs);
         }
 
         @Override
-        public Object unmarshalFrom(Ruby runtime, RubyClass type, UnmarshalStream input) throws IOException {
-            RubyRange range = (RubyRange) input.entry(type.allocate());
+        public void marshalTo(ThreadContext context, RubyOutputStream out, Object obj, RubyClass type,
+                              MarshalDumper marshalStream) {
+            RubyRange range = (RubyRange) obj;
+
+            marshalStream.registerLinkTarget(range);
+
+            marshalStream.dumpVariables(context, out, range, 3, (marshal, c, o, v, receiver) -> {
+                receiver.receive(marshal, c, o, "excl", v.isExclusive ? c.tru : c.fals);
+                receiver.receive(marshal, c, o, "begin", v.begin);
+                receiver.receive(marshal, c, o, "end", v.end);
+            });
+        }
+
+        @Override
+        @Deprecated(since = "10.0.0.0", forRemoval = true)
+        @SuppressWarnings("removal")
+        public Object unmarshalFrom(Ruby runtime, RubyClass type, org.jruby.runtime.marshal.UnmarshalStream input) throws IOException {
+            var context = runtime.getCurrentContext();
+            RubyRange range = (RubyRange) input.entry(type.allocate(context));
 
             input.ivar(null, range, null);
 
@@ -1165,11 +1375,29 @@ public class RubyRange extends RubyObject {
             if (begin == null) begin = (IRubyObject) range.removeInternalVariable("begini");
             if (end == null) end = (IRubyObject) range.removeInternalVariable("endi");
 
-            if (begin == null || end == null || excl == null) {
-                throw runtime.newArgumentError("bad value for range");
-            }
+            if (begin == null || end == null || excl == null) throw argumentError(context, "bad value for range");
 
-            range.init(runtime.getCurrentContext(), begin, end, excl.isTrue());
+            range.init(context, begin, end, excl.isTrue());
+            return range;
+        }
+
+        @Override
+        public Object unmarshalFrom(ThreadContext context, RubyInputStream in, RubyClass type, MarshalLoader input) {
+            RubyRange range = (RubyRange) input.entry(type.allocate(context));
+
+            input.ivar(context, in, null, range, null);
+
+            IRubyObject excl = (IRubyObject) range.removeInternalVariable("excl");
+            IRubyObject begin = (IRubyObject) range.removeInternalVariable("begin");
+            IRubyObject end = (IRubyObject) range.removeInternalVariable("end");
+
+            // try old names as well
+            if (begin == null) begin = (IRubyObject) range.removeInternalVariable("begini");
+            if (end == null) end = (IRubyObject) range.removeInternalVariable("endi");
+
+            if (begin == null || end == null || excl == null) throw argumentError(context, "bad value for range");
+
+            range.init(context, begin, end, excl.isTrue());
             return range;
         }
     };
@@ -1232,8 +1460,8 @@ public class RubyRange extends RubyObject {
         IRubyObject _beg = sites.begin.call(context, range, range);
         IRubyObject _end = sites.end.call(context, range, range);
         boolean excludeEnd = sites.exclude_end.call(context, range, range).isTrue();
-        int beg = _beg.isNil() ? 0 : _beg.convertToInteger().getIntValue();
-        int end = _end.isNil() ? -1 :_end.convertToInteger().getIntValue();
+        int beg = _beg.isNil() ? 0 : toInt(context, _beg);
+        int end = _end.isNil() ? -1 : toInt(context, _end);
         int origBeg = beg;
         int origEnd = end;
 
@@ -1265,7 +1493,7 @@ public class RubyRange extends RubyObject {
     }
 
     private static IRubyObject rangeBeginLengthError(ThreadContext context, int beg, int end, boolean excludeEnd, int err) {
-        if (err != 0) throw context.runtime.newRangeError(beg + ".." + (excludeEnd ? "." : "") + end + " out of range");
+        if (err != 0) throw rangeError(context, beg + ".." + (excludeEnd ? "." : "") + end + " out of range");
         return context.nil;
     }
 
@@ -1287,13 +1515,13 @@ public class RubyRange extends RubyObject {
 
     // MRI: rb_range_values
     public static RangeLike rangeValues(ThreadContext context, IRubyObject range) {
-        if (range instanceof RubyRange) {
-            RubyRange vrange = (RubyRange) range;
+        if (range instanceof RubyRange vrange) {
             return new RangeLike(vrange.begin(context), vrange.end(context), vrange.isExcludeEnd());
         } else if (range instanceof RubyArithmeticSequence) {
             return null;
         } else if (range.respondsTo("begin") && range.respondsTo("end") && range.respondsTo("exclude_end?")) {
-            return new RangeLike(Helpers.invoke(context, range, "begin"), Helpers.invoke(context, range, "end"), Helpers.invoke(context, range, "exclude_end?").isTrue());
+            return new RangeLike(Helpers.invoke(context, range, "begin"), Helpers.invoke(context, range, "end"),
+                    Helpers.invoke(context, range, "exclude_end?").isTrue());
         }
 
         return null;
@@ -1302,25 +1530,17 @@ public class RubyRange extends RubyObject {
     public static class BSearch {
         @JRubyMethod(meta = true)
         public static IRubyObject double_to_long_bits(ThreadContext context, IRubyObject bsearch, IRubyObject flote) {
-            long longBits;
-
-            if (flote instanceof RubyFixnum) {
-                longBits = Double.doubleToLongBits(((RubyFixnum) flote).getDoubleValue());
-            } else {
-                longBits = Double.doubleToLongBits(((RubyFloat) flote).getDoubleValue());
-            }
-
-            return context.runtime.newFixnum(longBits);
+            return asFixnum(context, Double.doubleToLongBits(((RubyNumeric) flote).asDouble(context)));
         }
 
         @JRubyMethod(meta = true)
         public static IRubyObject long_bits_to_double(ThreadContext context, IRubyObject bsearch, IRubyObject fixnum) {
-            return context.runtime.newFloat(Double.longBitsToDouble(((RubyFixnum) fixnum).getLongValue()));
+            return asFloat(context, Double.longBitsToDouble(((RubyFixnum) fixnum).getValue()));
         }
 
         @JRubyMethod(meta = true)
         public static IRubyObject abs(ThreadContext context, IRubyObject bsearch, IRubyObject flote) {
-            return context.runtime.newFloat(Math.abs(((RubyFloat) flote).getDoubleValue()));
+            return asFloat(context, Math.abs(((RubyFloat) flote).asDouble(context)));
         }
     }
 

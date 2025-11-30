@@ -8,6 +8,8 @@ import org.jruby.ir.runtime.IRRuntimeHelpers;
 import org.jruby.parser.StaticScope;
 import org.jruby.runtime.builtin.IRubyObject;
 
+import static org.jruby.api.Error.typeError;
+
 public abstract class IRBlockBody extends ContextAwareBlockBody {
     protected final String fileName;
     protected final int lineNumber;
@@ -72,7 +74,7 @@ public abstract class IRBlockBody extends ContextAwareBlockBody {
             return yieldDirect(context, block, null, null);
         } else {
             IRubyObject[] args = IRubyObject.NULL_ARRAY;
-            if (block.type == Block.Type.LAMBDA) signature.checkArity(context.runtime, args);
+            if (block.type == Block.Type.LAMBDA) signature.checkArity(context, args);
             return commonYieldPath(context, block, args, null, Block.NULL_BLOCK);
         }
     }
@@ -81,18 +83,18 @@ public abstract class IRBlockBody extends ContextAwareBlockBody {
     public IRubyObject yieldSpecific(ThreadContext context, Block block, IRubyObject arg0) {
         IRubyObject[] args;
         if (canCallDirect()) {
-            if (arg0 instanceof RubyArray) { // Unwrap the array arg
-                args = IRRuntimeHelpers.convertValueIntoArgArray(context, (RubyArray) arg0, signature);
+            if (arg0 instanceof RubyArray<?> ary) { // Unwrap the array arg
+                args = IRRuntimeHelpers.convertValueIntoArgArray(context, ary, signature);
             } else {
                 args = new IRubyObject[] { arg0 };
             }
             return yieldDirect(context, block, args, null);
         } else {
-            if (arg0 instanceof RubyArray) { // Unwrap the array arg
-                args = IRRuntimeHelpers.convertValueIntoArgArray(context, (RubyArray) arg0, signature);
+            if (arg0 instanceof RubyArray<?> ary) { // Unwrap the array arg
+                args = IRRuntimeHelpers.convertValueIntoArgArray(context, ary, signature);
 
                 // FIXME: arity error is against new args but actual error shows arity of original args.
-                if (block.type == Block.Type.LAMBDA) signature.checkArity(context.runtime, args);
+                if (block.type == Block.Type.LAMBDA) signature.checkArity(context, args);
 
                 return commonYieldPath(context, block, args, null, Block.NULL_BLOCK);
             } else {
@@ -111,7 +113,7 @@ public abstract class IRBlockBody extends ContextAwareBlockBody {
         if (signature.arityValue() == 0) {
             args = IRubyObject.NULL_ARRAY; // discard args
         }
-        if (block.type == Block.Type.LAMBDA) signature.checkArity(context.runtime, args);
+        if (block.type == Block.Type.LAMBDA) signature.checkArity(context, args);
 
         return commonYieldPath(context, block, args, null, Block.NULL_BLOCK);
     }
@@ -129,11 +131,10 @@ public abstract class IRBlockBody extends ContextAwareBlockBody {
     public static IRubyObject[] toAry(ThreadContext context, IRubyObject value) {
         final IRubyObject ary = Helpers.aryToAry(context, value);
 
-        if (ary instanceof RubyArray) return ((RubyArray) ary).toJavaArray();
-
+        if (ary instanceof RubyArray<?> array) return array.toJavaArray(context);
         if (ary == context.nil) return new IRubyObject[] { value };
 
-        throw context.runtime.newTypeError(value.getType().getName() + "#to_ary should return Array");
+        throw typeError(context, "", value, "#to_ary should return Array");
     }
 
     protected IRubyObject doYieldLambda(ThreadContext context, Block block, IRubyObject value) {
@@ -148,7 +149,7 @@ public abstract class IRBlockBody extends ContextAwareBlockBody {
             args = toAry(context, value);
         }
 
-        signature.checkArity(context.runtime, args);
+        signature.checkArity(context, args);
 
         return commonYieldPath(context, block, args, null, Block.NULL_BLOCK);
     }
@@ -171,7 +172,7 @@ public abstract class IRBlockBody extends ContextAwareBlockBody {
 
     @Override
     public IRubyObject doYield(ThreadContext context, Block block, IRubyObject[] args, IRubyObject self) {
-        if (block.type == Block.Type.LAMBDA) signature.checkArity(context.runtime, args);
+        if (block.type == Block.Type.LAMBDA) signature.checkArity(context, args);
 
         return commonYieldPath(context, block, args, self, Block.NULL_BLOCK);
     }

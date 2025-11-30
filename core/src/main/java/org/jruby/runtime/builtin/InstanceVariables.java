@@ -6,6 +6,8 @@
 package org.jruby.runtime.builtin;
 
 import java.util.List;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * Interface that represents the instance variable aspect of Ruby
@@ -26,7 +28,7 @@ public interface InstanceVariables {
      */
     boolean hasInstanceVariable(String name);
 
-    @Deprecated
+    @Deprecated(since = "1.7.0")
     boolean fastHasInstanceVariable(String internedName);
     
     /**
@@ -37,7 +39,7 @@ public interface InstanceVariables {
      */
     IRubyObject getInstanceVariable(String name);
 
-    @Deprecated
+    @Deprecated(since = "1.7.0")
     IRubyObject fastGetInstanceVariable(String internedName);
 
     /**
@@ -45,10 +47,11 @@ public interface InstanceVariables {
      * 
      * @param name the name of an instance variable
      * @param value the value to be set
+     * @return value
      */    
     IRubyObject setInstanceVariable(String name, IRubyObject value);
 
-    @Deprecated
+    @Deprecated(since = "1.7.0")
     IRubyObject fastSetInstanceVariable(String internedName, IRubyObject value);
 
     /**
@@ -61,17 +64,38 @@ public interface InstanceVariables {
     IRubyObject removeInstanceVariable(String name);
 
     /**
+     * list of instance variables
      * @return instance variables
      */
     List<Variable<IRubyObject>> getInstanceVariableList();
 
     /**
+     * list of instance variables as Strings
      * @return instance variable names
      */
     List<String> getInstanceVariableNameList();
 
     /**
      * Copies all instance variables from the given object into the receiver
+     * @param other the thing to copy into
      */
     void copyInstanceVariablesInto(InstanceVariables other);
+
+    /**
+     * Iterate over all instance variable name/value pairs for this object.
+     *
+     * @param accessor a consumer for each variable
+     */
+    default void forEachInstanceVariable(BiConsumer<String, IRubyObject> accessor) {
+        getInstanceVariableList().forEach((var) -> accessor.accept(var.getName(), var.getValue()));
+    }
+
+    /**
+     * Iterate over all instance variable names for this object.
+     *
+     * @param consumer consumer for the names
+     */
+    default void forEachInstanceVariableName(Consumer<String> consumer) {
+        forEachInstanceVariable((name, value) -> consumer.accept(name));
+    }
 }

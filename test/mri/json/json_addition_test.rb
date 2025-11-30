@@ -1,5 +1,5 @@
-#frozen_string_literal: false
-require 'test_helper'
+# frozen_string_literal: true
+require_relative 'test_helper'
 require 'json/add/core'
 require 'json/add/complex'
 require 'json/add/rational'
@@ -114,8 +114,7 @@ class JSONAdditionTest < Test::Unit::TestCase
   end
 
   def test_raw_strings
-    raw = ''
-    raw.respond_to?(:encode!) and raw.encode!(Encoding::ASCII_8BIT)
+    raw = ''.b
     raw_array = []
     for i in 0..255
       raw << i
@@ -163,9 +162,15 @@ class JSONAdditionTest < Test::Unit::TestCase
     assert_equal(/foo/i, JSON(JSON(/foo/i), :create_additions => true))
   end
 
+  def test_deprecated_load_create_additions
+    assert_deprecated_warning(/use JSON\.unsafe_load/) do
+      JSON.load(JSON.dump(Time.now))
+    end
+  end
+
   def test_utc_datetime
     now = Time.now
-    d = DateTime.parse(now.to_s, :create_additions => true) # usual case
+    d = DateTime.parse(now.to_s) # usual case
     assert_equal d, parse(d.to_json, :create_additions => true)
     d = DateTime.parse(now.utc.to_s) # of = 0
     assert_equal d, parse(d.to_json, :create_additions => true)
@@ -183,14 +188,14 @@ class JSONAdditionTest < Test::Unit::TestCase
   def test_bigdecimal
     assert_equal BigDecimal('3.141', 23), JSON(JSON(BigDecimal('3.141', 23)), :create_additions => true)
     assert_equal BigDecimal('3.141', 666), JSON(JSON(BigDecimal('3.141', 666)), :create_additions => true)
-  end
+  end if defined?(::BigDecimal)
 
   def test_ostruct
     o = OpenStruct.new
     # XXX this won't work; o.foo = { :bar => true }
     o.foo = { 'bar' => true }
     assert_equal o, parse(JSON(o), :create_additions => true)
-  end
+  end if defined?(::OpenStruct)
 
   def test_set
     s = Set.new([:a, :b, :c, :a])

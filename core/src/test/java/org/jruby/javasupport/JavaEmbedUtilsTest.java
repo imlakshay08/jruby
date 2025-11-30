@@ -9,6 +9,8 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.newEmptyArray;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -16,6 +18,7 @@ import static org.junit.Assert.fail;
 
 import org.jruby.java.proxies.ConcreteJavaProxy;
 import org.jruby.java.proxies.JavaProxy;
+import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -47,7 +50,7 @@ public class JavaEmbedUtilsTest {
         Thread.currentThread().setContextClassLoader( cl );
     }
 
-    private static List<String> EMPTY = Collections.emptyList();
+    private static final List<String> EMPTY = Collections.emptyList();
     
     @Test
     public void testAddClassloaderToLoadPathOnTCCL() throws Exception {
@@ -57,8 +60,10 @@ public class JavaEmbedUtilsTest {
         URL url = new File("src/test/resources/java_embed_utils").toURI().toURL();
         config.addLoader(new URLClassLoader(new URL[]{url}));
         Ruby runtime = JavaEmbedUtils.initialize(EMPTY, config);
-        String result = runtime.evalScriptlet("require 'test_me'; $result").toString();
-        assertEquals(result, "uri:" + url);
+        String result = runtime.evalScriptlet("require 'test_me';$result").toString();
+        String expected = "uri:" + url; // File#toURI() adds a trailing '/' for directories
+        if (expected.endsWith("/")) expected = expected.substring(0, expected.length() - 1);
+        assertEquals(expected, result);
     }
 
     @Test
@@ -69,12 +74,15 @@ public class JavaEmbedUtilsTest {
         config.addLoader(new URLClassLoader(new URL[]{url}));
         Ruby runtime = JavaEmbedUtils.initialize(EMPTY, config);
         String result = runtime.evalScriptlet("require 'test_me';$result").toString();
-        assertEquals(result, "uri:" + url);
+        String expected = "uri:" + url; // File#toURI() adds a trailing '/' for directories
+        if (expected.endsWith("/")) expected = expected.substring(0, expected.length() - 1);
+        assertEquals(expected, result);
     }
 
     @Test
     public void testAPIUsageTheNonGenericWay() { // before <T> generic signatures were introduced (JRuby <= 9.4.0)
         final Ruby runtime = Ruby.newInstance();
+        var context = runtime.getCurrentContext();
         IRubyObject str = runtime.evalScriptlet("'foo'");
         Object javaStr = JavaEmbedUtils.rubyToJava(runtime, str, String.class);
         assertEquals("foo", javaStr);
@@ -83,26 +91,27 @@ public class JavaEmbedUtilsTest {
         javaStr = JavaEmbedUtils.rubyToJava(runtime, str, Object.class);
         assertEquals("barbarbar", javaStr);
 
-        Object val = JavaEmbedUtils.rubyToJava(runtime.newEmptyArray());
+        Object val = JavaEmbedUtils.rubyToJava(newEmptyArray(context));
         assertEquals("org.jruby.RubyArray", val.getClass().getName());
     }
 
     @Test
     public void testJavaToRubyPrimitive() {
         final Ruby runtime = Ruby.newInstance();
+        ThreadContext context = runtime.getCurrentContext();
 
         IRubyObject v;
         v = JavaEmbedUtils.javaToRuby(runtime, -100L);
-        assertEquals(runtime.newFixnum(-100), v);
+        assertEquals(asFixnum(context, -100), v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, 200);
-        assertEquals(runtime.newFixnum(200), v);
+        assertEquals(asFixnum(context, 200), v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, (short) 200);
-        assertEquals(runtime.newFixnum(200), v);
+        assertEquals(asFixnum(context, 200), v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, (byte) 100);
-        assertEquals(runtime.newFixnum(100), v);
+        assertEquals(asFixnum(context, 100), v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, 10.0f);
         assertEquals(runtime.newFloat(10.0), v);
@@ -111,25 +120,26 @@ public class JavaEmbedUtilsTest {
         assertEquals(runtime.newFloat(10.0), v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, true);
-        assertSame(runtime.getTrue(), v);
+        assertSame(context.tru, v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, false);
-        assertSame(runtime.getFalse(), v);
+        assertSame(context.fals, v);
     }
 
     @Test
     public void testJavaToRuby() {
         final Ruby runtime = Ruby.newInstance();
+        ThreadContext context = runtime.getCurrentContext();
 
         IRubyObject v;
         v = JavaEmbedUtils.javaToRuby(runtime, "");
         assertEquals(runtime.newString(), v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, Long.valueOf(42L));
-        assertEquals(runtime.newFixnum(42), v);
+        assertEquals(asFixnum(context, 42), v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, Boolean.TRUE);
-        assertSame(runtime.getTrue(), v);
+        assertSame(context.tru, v);
 
         v = JavaEmbedUtils.javaToRuby(runtime, new StringBuilder());
         assertEquals(ConcreteJavaProxy.class, v.getClass()); // no more JavaObject wrapping!

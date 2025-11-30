@@ -30,20 +30,23 @@ package org.jruby.ext.thread;
 
 import org.jruby.Ruby;
 import org.jruby.RubyClass;
+import org.jruby.RubyHash;
 import org.jruby.RubyNumeric;
 import org.jruby.RubyThread;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
-import org.jruby.runtime.Arity;
-import org.jruby.runtime.ObjectAllocator;
+import org.jruby.ast.util.ArgsUtil;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.Visibility;
 import org.jruby.runtime.builtin.IRubyObject;
 
-import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.toInt;
+import static org.jruby.api.Error.argumentError;
 
 /**
  * The "SizedQueue" class from the 'thread' library.
@@ -57,40 +60,32 @@ public class SizedQueue extends Queue {
     public SizedQueue(Ruby runtime, RubyClass type, int max) {
         super(runtime, type);
 
-        initialize(runtime.getCurrentContext(), runtime.newFixnum(max));
+        ThreadContext context = runtime.getCurrentContext();
+        initialize(context, asFixnum(context, max));
     }
 
-    public static RubyClass setup(RubyClass threadClass, RubyClass queueClass, RubyClass objectClass) {
-        RubyClass cSizedQueue = threadClass.defineClassUnder("SizedQueue", queueClass, SizedQueue::new);
-
-        cSizedQueue.setReifiedClass(SizedQueue.class);
-        cSizedQueue.defineAnnotatedMethods(SizedQueue.class);
-
-        objectClass.setConstant("SizedQueue", cSizedQueue);
-
-        return cSizedQueue;
+    public static RubyClass setup(ThreadContext context, RubyClass Thread, RubyClass Queue, RubyClass Object) {
+        return (RubyClass) Object.setConstant(context, "SizedQueue",
+                Thread.defineClassUnder(context, "SizedQueue", Queue, SizedQueue::new).
+                        reifiedClass(SizedQueue.class).defineMethods(context, SizedQueue.class));
     }
 
     @JRubyMethod
     public RubyNumeric max(ThreadContext context) {
-        return RubyNumeric.int2fix(context.runtime, capacity);
+        return asFixnum(context, capacity);
     }
 
     @JRubyMethod(name = "max=")
     public synchronized IRubyObject max_set(ThreadContext context, IRubyObject arg) {
-        initializedCheck();
-        Ruby runtime = context.runtime;
-        int max = RubyNumeric.num2int(arg), diff = 0;
+        initializedCheck(context);
 
-        if (max <= 0) {
-            throw runtime.newArgumentError("queue size must be positive");
-        }
+        int max = toInt(context, arg), diff = 0;
+        if (max <= 0) throw argumentError(context, "queue size must be positive");
 
         fullyLock();
         try {
-            if (count.get() >= capacity && max > capacity) {
-                diff = max - capacity;
-            }
+            if (count.get() >= capacity && max > capacity) diff = max - capacity;
+
             capacity = max;
             while (diff-- > 0) {
                 notFull.signal();
@@ -110,7 +105,7 @@ public class SizedQueue extends Queue {
 
     @JRubyMethod
     public RubyNumeric num_waiting(ThreadContext context) {
-        initializedCheck();
+        initializedCheck(context);
         final ReentrantLock takeLock = this.takeLock;
         final ReentrantLock putLock = this.putLock;
         try {
@@ -118,7 +113,7 @@ public class SizedQueue extends Queue {
             try {
                 putLock.lockInterruptibly();
                 try {
-                    return context.runtime.newFixnum(takeLock.getWaitQueueLength(notEmpty) + putLock.getWaitQueueLength(notFull));
+                    return asFixnum(context, takeLock.getWaitQueueLength(notEmpty) + putLock.getWaitQueueLength(notFull));
                 } finally {
                     putLock.unlock();
                 }
@@ -132,26 +127,73 @@ public class SizedQueue extends Queue {
 
     @JRubyMethod(name = {"push", "<<", "enq"})
     public IRubyObject push(ThreadContext context, final IRubyObject arg0) {
-        initializedCheck();
+        initializedCheck(context);
 
         try {
-            return context.getThread().executeTaskBlocking(context, arg0, blockingPushTask);
+            return context.getThread().executeTaskBlocking(context, arg0, blockingPutTask);
         } catch (InterruptedException ie) {
             throw createInterruptedError(context, "push");
         }
     }
 
     @JRubyMethod(name = {"push", "<<", "enq"})
-    public IRubyObject push(ThreadContext context, final IRubyObject arg0, final IRubyObject nonblock) {
-        initializedCheck();
+    public IRubyObject push(ThreadContext context, final IRubyObject arg0, final IRubyObject nonblockOrOpts) {
+        initializedCheck(context);
 
+        boolean nonblock = false;
+        long timeoutNS = 0;
+
+        RubyHash opts = ArgsUtil.extractKeywords(nonblockOrOpts);
+
+        if (opts != null) {
+            IRubyObject _timeout = ArgsUtil.extractKeywordArg(context, "timeout", opts);
+
+            if (!_timeout.isNil()) {
+                timeoutNS = queueTimeoutToNanos(context, _timeout);
+
+                if (timeoutNS == 0 && count.get() == capacity) {
+                    return context.nil;
+                }
+            }
+        } else {
+            nonblock = nonblockOrOpts.isTrue();
+        }
+
+        return pushCommon(context, arg0, nonblock, timeoutNS);
+    }
+
+    @JRubyMethod(name = {"push", "<<", "enq"})
+    public IRubyObject push(ThreadContext context, final IRubyObject arg0, final IRubyObject _nonblock, IRubyObject _opts) {
+        initializedCheck(context);
+
+        boolean nonblock = _nonblock.isTrue();
+        long timeoutNS = 0;
+
+        IRubyObject _timeout = ArgsUtil.extractKeywordArg(context, "timeout", _opts);
+        if (!_timeout.isNil()) {
+            if (nonblock) throw argumentError(context, "can't set a timeout if non_block is enabled");
+
+            timeoutNS = queueTimeoutToNanos(context, _timeout);
+
+            if (timeoutNS == 0 && count.get() == capacity) return context.nil;
+        }
+
+        return pushCommon(context, arg0, nonblock, timeoutNS);
+    }
+
+    private IRubyObject pushCommon(ThreadContext context, IRubyObject arg0, boolean nonblock, long timeoutNS) {
         try {
             RubyThread thread = context.getThread();
-            if (nonblock.isTrue()) {
-                return thread.executeTask(context, arg0, nonblockingPushTask);
-            } else {
-                return thread.executeTaskBlocking(context, arg0, blockingPushTask);
+            if (nonblock) {
+                if (!offerInternal(context, arg0)) throw context.runtime.newThreadError("queue full");
+
+                return this;
             }
+
+            RubyThread.Task<IRubyObject, IRubyObject> task = timeoutNS != 0 ?
+                    new BlockingOfferTask(timeoutNS) : blockingPutTask;
+
+            return thread.executeTaskBlocking(context, arg0, task);
         } catch (InterruptedException ie) {
             throw createInterruptedError(context, "push");
         }
@@ -162,29 +204,68 @@ public class SizedQueue extends Queue {
         final AtomicInteger count = this.count;
         if (count.get() == capacity)
             return false;
-        int c = -1;
-        Node node = new Node(e);
+        final int c;
+        final Node node = new Node(e);
         final ReentrantLock putLock = this.putLock;
         putLock.lock();
+        try {
+            if (closed) raiseClosedError(context);
+            if (count.get() == capacity) return false;
+            enqueue(node);
+            c = count.getAndIncrement();
+            if (c + 1 < capacity) notFull.signal();
+        } finally {
+            putLock.unlock();
+        }
+        if (c == 0) signalNotEmpty();
+        return true;
+    }
+
+    public boolean offerInternal(ThreadContext context, IRubyObject e, long timeout, TimeUnit unit)
+            throws InterruptedException {
+
+        if (e == null) throw new NullPointerException();
+        long nanos = unit.toNanos(timeout);
+        final int c;
+        final ReentrantLock putLock = this.putLock;
+        final AtomicInteger count = this.count;
+        putLock.lockInterruptibly();
         try {
             if (closed) {
                 raiseClosedError(context);
             }
-            if (count.get() < capacity) {
-                enqueue(node);
-                c = count.getAndIncrement();
-                if (c + 1 < capacity)
-                    notFull.signal();
+            /*
+            Similar to differences in Queue from LinkedBlockingQueue, this checks for the closed flag,
+            propagating a ClosedError along the waiters if we find the queue has been closed while waiting.
+             */
+            boolean isClosed;
+            while (!(isClosed = closed) && count.get() == capacity) {
+                if (nanos <= 0L)
+                    return false;
+                nanos = notFull.awaitNanos(nanos);
             }
+            if (isClosed) {
+                // wake the next in line
+                notFull.signal();
+                // note that this is now a new early exit from the method,
+                // this doesn't matter because for the closed queues it is
+                // not a producer's responsibility to wake the blocked consumers
+                // (they wake each other, while the first in line gets notified
+                // by the close() caller)
+                raiseClosedError(context);
+            }
+            enqueue(new Node(e));
+            c = count.getAndIncrement();
+            if (c + 1 < capacity)
+                notFull.signal();
         } finally {
             putLock.unlock();
         }
-        if (c == 0)
-            signalNotEmpty();
-        return c >= 0;
+        if (c == 0) signalNotEmpty();
+        return true;
     }
 
-    private final RubyThread.Task<IRubyObject, IRubyObject> blockingPushTask = new RubyThread.Task<IRubyObject, IRubyObject>() {
+    private final RubyThread.Task<IRubyObject, IRubyObject> blockingPutTask = new RubyThread.Task<>() {
         @Override
         public IRubyObject run(ThreadContext context, IRubyObject value) throws InterruptedException {
             putInternal(context, value);
@@ -197,30 +278,31 @@ public class SizedQueue extends Queue {
         }
     };
 
-    private final RubyThread.Task<IRubyObject, IRubyObject> nonblockingPushTask = new RubyThread.Task<IRubyObject, IRubyObject>() {
-        @Override
-        public IRubyObject run(ThreadContext context, IRubyObject value) {
-            if (!offerInternal(context, value)) {
-                throw context.runtime.newThreadError("queue full");
-            }
-            return SizedQueue.this;
+    private final class BlockingOfferTask implements RubyThread.Task<IRubyObject, IRubyObject> {
+        private final long timeoutNS;
+
+        public BlockingOfferTask(long timeoutNS) {
+            this.timeoutNS = timeoutNS;
         }
 
         @Override
-        public void wakeup(RubyThread thread, IRubyObject value) {
+        public IRubyObject run(ThreadContext context, IRubyObject value) throws InterruptedException {
+            boolean result = offerInternal(context, value, timeoutNS, TimeUnit.NANOSECONDS);
+            return !result ? context.nil : SizedQueue.this;
+        }
+
+        @Override
+        public void wakeup(RubyThread thread, IRubyObject sizedQueue) {
             thread.getNativeThread().interrupt();
         }
-    };
+    }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public IRubyObject push(ThreadContext context, final IRubyObject[] argv) {
-        switch (argv.length) {
-            case 1:
-                return push(context, argv[0]);
-            case 2:
-                return push(context, argv[0], argv[1]);
-            default:
-                throw context.runtime.newArgumentError(argv.length, 1, 2);
-        }
+        return switch (argv.length) {
+            case 1 -> push(context, argv[0]);
+            case 2 -> push(context, argv[0], argv[1]);
+            default -> throw argumentError(context, argv.length, 1, 2);
+        };
     }
 }

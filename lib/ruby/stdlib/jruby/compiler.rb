@@ -58,7 +58,7 @@ module JRuby::Compiler
       end
 
       opts.on("-J OPTION", "Pass OPTION to javac for javac compiles") do |o|
-        o[:javac_options] << o
+        options[:javac_options] << o
       end
 
       opts.on("--java", "Generate Java classes (.java) for a script containing Ruby class definitions") do
@@ -273,7 +273,7 @@ module JRuby::Compiler
     errors = 0
     # Process all the file arguments
     Dir[*filenames].each do |filename|
-      unless File.exists? filename
+      unless File.exist? filename
         puts "Error -- file not found: #{filename}"
         errors += 1
         next

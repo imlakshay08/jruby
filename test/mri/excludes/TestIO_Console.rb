@@ -1,7 +1,17 @@
-# frozen_string_literal: false
-exclude :test_noctty, 'we return an IO.console even when not a TTY'
-exclude :test_cooked, "needs investigation"
-exclude :test_getch_timeout, "needs investigation"
-exclude :test_raw_minchar, "needs investigation"
-exclude :test_raw_timeout, "needs investigation"
-exclude :test_raw, "needs investigation"
+exclude :"test_raw!", "work in progress"
+exclude :test_cooked, 'hangs on macos m1'
+exclude :test_echo, "work in progress"
+exclude :test_getch_timeout, 'hangs on macos m1'
+exclude :test_getpass, 'not portable'
+exclude :test_iflush, "work in progress"
+exclude :test_ioflush, "work in progress"
+exclude :test_ioflush2, "work in progress"
+exclude :test_noecho, "work in progress"
+exclude :test_noecho2, "work in progress"
+exclude :test_oflush, "work in progress"
+exclude :test_raw, 'hangs on macos m1'
+exclude :test_raw_minchar, 'hangs on macos m1'
+exclude :test_raw_timeout, 'hangs on macos m1'
+exclude :test_setecho, "work in progress"
+exclude :test_setecho2, "work in progress"
+exclude :test_winsize, "work in progress"

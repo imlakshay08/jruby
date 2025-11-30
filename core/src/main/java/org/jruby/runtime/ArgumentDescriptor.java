@@ -5,9 +5,11 @@ import org.jruby.RubyArray;
 import org.jruby.RubyEncoding;
 import org.jruby.RubyString;
 import org.jruby.RubySymbol;
-import org.jruby.internal.runtime.methods.DescriptorInfo;
+import org.jruby.api.Convert;
 
 import java.util.Arrays;
+
+import static org.jruby.api.Create.newString;
 
 /**
  * A description of a single argument in a Ruby argument list.  Primarily used in Method.to_proc.
@@ -38,41 +40,47 @@ public class ArgumentDescriptor {
         this(type, null);
     }
 
+    @Deprecated(since = "10.0.0.0")
     public final RubyArray toArrayForm(Ruby runtime, boolean isLambda) {
-        ArgumentType argType = type == ArgumentType.req && !isLambda ? ArgumentType.opt : type;
+        return toArrayForm(runtime.getCurrentContext(), isLambda);
+    }
 
-        return argType.toArrayForm(runtime, name);
+    public final RubyArray toArrayForm(ThreadContext context, boolean isLambda) {
+        ArgumentType argType = type == ArgumentType.req && !isLambda ? ArgumentType.opt : type;
+        RubySymbol name = this.name;
+
+        // FIXME: When consolidating block and method parameter arg descriptors eliminate this special *,** handling.
+
+        // Normal {,key}rest arguments have a name but no `*`.  Empty `*` and `**` also have no name but
+        // are displayed as `*` and `**`.  We do not set name properly when defining these because for
+        // methods we have no reference to runtime to construct the symbol for `*` or `**`.
+        if (!type.anonymous && name.getBytes().length() == 0) {
+            if (type == ArgumentType.rest) {
+                name = Convert.asSymbol(context, "*");
+            } else if (type == ArgumentType.keyrest) {
+                name = Convert.asSymbol(context, "**");
+            }
+        }
+
+        return argType.toArrayForm(context, name);
     }
 
     public RubyString asParameterName(ThreadContext context) {
-        switch (type) {
-            case req:
-                return name.asString();
-            case opt:
-                return ((RubyString) name.asString().dup()).catString("=...");
-            case key:
-                return ((RubyString) name.asString().dup()).catString(": ...");
-            case keyreq:
-                return ((RubyString) name.asString().dup()).catString(":");
-            case keyrest:
-                return context.runtime.newString("**").cat(name.asString());
-            case block:
-                return context.runtime.newString("&").cat(name.asString());
-            case rest:
-                return context.runtime.newString("*").cat(name.asString());
-            case anonrest:
-                return context.runtime.newString("*");
-            case anonkeyrest:
-                return context.runtime.newString("**");
-            case anonreq:
-            case anonopt:
-                return context.runtime.newString("_");
-            case nokey:
-                return context.runtime.newString("**nil");
-        }
+        return switch (type) {
+            case req -> name.asString();
+            case opt -> ((RubyString) name.asString().dup()).catString("=...");
+            case key -> ((RubyString) name.asString().dup()).catString(": ...");
+            case keyreq -> ((RubyString) name.asString().dup()).catString(":");
+            case keyrest -> newString(context, "**").cat(name.asString());
+            case block -> newString(context, "&").cat(name.asString());
+            case rest -> newString(context, "*").cat(name.asString());
+            case anonrest -> newString(context, "*");
+            case anonkeyrest -> newString(context, "**");
+            case anonreq, anonopt -> newString(context, "_");
+            case nokey -> newString(context, "**nil");
+        };
 
         // not reached
-        return null;
     }
     /**
      * Allow JIT/AOT to store argument descriptors as a single String constant.

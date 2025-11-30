@@ -9,6 +9,10 @@ import org.jruby.java.util.ArrayUtils;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.newEmptyArray;
+import static org.jruby.api.Error.typeError;
+
 public class ArrayJavaAddons {
 
     @JRubyMethod(name = "copy_data")
@@ -76,60 +80,52 @@ public class ArrayJavaAddons {
 
     @JRubyMethod
     public static IRubyObject dimensions(ThreadContext context, IRubyObject rubyArray) {
-        return dimensions(context, rubyArray, context.runtime.newEmptyArray());
+        return dimensions(context, rubyArray, newEmptyArray(context));
     }
 
     @JRubyMethod
     public static IRubyObject dimensions(ThreadContext context, IRubyObject rubyArray, IRubyObject dims) {
-        final Ruby runtime = context.runtime;
-        if ( ! ( rubyArray instanceof RubyArray ) ) {
-            return runtime.newEmptyArray();
-        }
+        if (!(rubyArray instanceof RubyArray)) return newEmptyArray(context);
+
         assert dims instanceof RubyArray;
 
-        return calcDimensions(runtime, (RubyArray) rubyArray, (RubyArray) dims, 0);
+        return calcDimensions(context, (RubyArray<?>) rubyArray, (RubyArray<?>) dims, 0);
     }
 
     @JRubyMethod
     public static IRubyObject dimensions(ThreadContext context, IRubyObject rubyArray, IRubyObject dims, IRubyObject index) {
-        final Ruby runtime = context.runtime;
-        if ( ! ( rubyArray instanceof RubyArray ) ) {
-            return runtime.newEmptyArray();
-        }
+        if (!(rubyArray instanceof RubyArray)) return newEmptyArray(context);
+
         assert dims instanceof RubyArray;
         assert index instanceof RubyFixnum;
 
-        final int i = (int) ((RubyFixnum) index).getLongValue();
-        return calcDimensions(runtime, (RubyArray) rubyArray, (RubyArray) dims, i);
+        return calcDimensions(context, (RubyArray<?>) rubyArray, (RubyArray<?>) dims, ((RubyFixnum) index).asInt(context));
     }
 
-    private static RubyArray calcDimensions(final Ruby runtime,
-        final RubyArray array, final RubyArray dims, final int index) {
+    private static RubyArray<?> calcDimensions(ThreadContext context,
+        final RubyArray<?> array, final RubyArray dims, final int index) {
 
+        var zero = asFixnum(context, 0);
         while ( dims.size() <= index ) {
-            dims.append( RubyFixnum.zero(runtime) );
+            dims.append(context, zero);
         }
 
-        final long dim = ((RubyFixnum) dims.eltInternal(index)).getLongValue();
+        final long dim = ((RubyFixnum) dims.eltInternal(index)).getValue();
         if ( array.size() > dim ) {
-            dims.eltInternalSet(index, RubyFixnum.newFixnum(runtime, array.size()));
+            dims.eltInternalSet(index, asFixnum(context, array.size()));
         }
 
         for ( int i = 0; i < array.size(); i++ ) {
             final IRubyObject element = array.eltInternal(i);
-            if ( element instanceof RubyArray ) {
-                calcDimensions(runtime, (RubyArray) element, dims, 1);
-            }
+            if ( element instanceof RubyArray ary) calcDimensions(context, ary, dims, 1);
         }
 
         return dims;
     }
 
     private static ArrayJavaProxy assertJavaArrayProxy(final ThreadContext context, final IRubyObject java_array) {
-        if (java_array instanceof ArrayJavaProxy) {
-            return (ArrayJavaProxy) java_array;
-        }
-        throw context.runtime.newTypeError("expected a Java array, got " + java_array.inspect());
+        if (!(java_array instanceof ArrayJavaProxy)) throw typeError(context, java_array, "Java array");
+        return (ArrayJavaProxy) java_array;
     }
 
 }

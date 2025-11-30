@@ -29,11 +29,13 @@ import org.jruby.RubyEncoding;
 import org.jruby.RubyFixnum;
 import org.jruby.RubyHash;
 import org.jruby.RubyIO;
+import org.jruby.RubyInteger;
 import org.jruby.RubyMethod;
-import org.jruby.RubyNumeric;
 import org.jruby.RubyProc;
 import org.jruby.RubyString;
 import org.jruby.RubySymbol;
+import org.jruby.api.API;
+import org.jruby.api.Convert;
 import org.jruby.exceptions.RaiseException;
 import org.jruby.platform.Platform;
 import org.jruby.runtime.Block;
@@ -53,8 +55,16 @@ import java.nio.charset.UnsupportedCharsetException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.BiConsumer;
 
-import static org.jruby.RubyString.*;
+import static org.jruby.RubyString.encodeBytelist;
+import static org.jruby.RubyString.newBinaryString;
+import static org.jruby.RubyString.newEmptyString;
+import static org.jruby.api.Access.encodingService;
+import static org.jruby.api.Convert.*;
+import static org.jruby.api.Create.*;
+import static org.jruby.api.Error.*;
+import static org.jruby.api.Warn.warn;
 import static org.jruby.util.StringSupport.CR_UNKNOWN;
 import static org.jruby.util.StringSupport.searchNonAscii;
 
@@ -76,15 +86,21 @@ public class EncodingUtils {
     public static Encoding toEncoding(ThreadContext context, IRubyObject enc) {
         RubyString encStr = enc.convertToString();
         if (!encStr.getEncoding().isAsciiCompatible()) {
-            throw context.runtime.newArgumentError("invalid encoding name (non ASCII)");
+            throw argumentError(context, "invalid encoding name (non ASCII)");
         }
-        Encoding idx = context.runtime.getEncodingService().getEncodingFromObject(encStr);
+        Encoding idx = encodingService(context).getEncodingFromObject(encStr);
         // check for missing encoding is in getEncodingFromObject
         return idx;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static IRubyObject[] openArgsToArgs(Ruby runtime, IRubyObject firstElement, RubyHash options) {
-        IRubyObject value = hashARef(runtime, options, "open_args");
+        return openArgsToArgs(runtime.getCurrentContext(), firstElement, options);
+    }
+
+    @Deprecated(since = "10.0.0.0")
+    public static IRubyObject[] openArgsToArgs(ThreadContext context, IRubyObject firstElement, RubyHash options) {
+        IRubyObject value = hashARef(context, options, "open_args");
 
         if (value.isNil()) return new IRubyObject[] { firstElement, options };
 
@@ -101,66 +117,90 @@ public class EncodingUtils {
         return args;
     }
 
+    @Deprecated(since = "10.0.0.0")
+    public static void extractBinmode(Ruby runtime, IRubyObject optionsArg, int[] fmode_p) {
+        extractBinmode(runtime.getCurrentContext(), optionsArg, fmode_p);
+    }
+
     // FIXME: This could be smarter amount determining whether optionsArg is a RubyHash and !null (invariant)
     // mri: extract_binmode
-    public static void extractBinmode(Ruby runtime, IRubyObject optionsArg, int[] fmode_p) {
+    public static void extractBinmode(ThreadContext context, IRubyObject optionsArg, int[] fmode_p) {
         int fmodeMask = 0;
 
-        IRubyObject textMode = hashARef(runtime, optionsArg, "textmode");
-        IRubyObject binMode = hashARef(runtime, optionsArg, "binmode");
+        IRubyObject textMode = hashARef(context, optionsArg, "textmode");
+        IRubyObject binMode = hashARef(context, optionsArg, "binmode");
 
         boolean textKwarg = !textMode.isNil();
         boolean textOption = (fmode_p[0] & OpenFile.TEXTMODE) != 0;
         boolean binKwarg = !binMode.isNil();
         boolean binOption = (fmode_p[0] & OpenFile.BINMODE) != 0;
 
-        if ((textKwarg || textOption) && (binKwarg || binOption)) throw runtime.newArgumentError("both textmode and binmode specified");
+        if ((textKwarg || textOption) && (binKwarg || binOption)) throw argumentError(context, "both textmode and binmode specified");
 
         if (textKwarg) {
-            if (textOption) throw runtime.newArgumentError("textmode specified twice");
+            if (textOption) throw argumentError(context, "textmode specified twice");
             if (textMode.isTrue()) fmodeMask |= OpenFile.TEXTMODE;
         }
         if (binKwarg) {
-            if (binOption) throw runtime.newArgumentError("binmode specified twice");
+            if (binOption) throw argumentError(context, "binmode specified twice");
             if (binMode.isTrue()) fmodeMask |= OpenFile.BINMODE;
         }
 
         fmode_p[0] |= fmodeMask;
     }
 
-    private static IRubyObject hashARef(Ruby runtime, IRubyObject hash, String symbol) {
-        if (hash == null || !(hash instanceof RubyHash)) return runtime.getNil();
+    private static IRubyObject hashARef(ThreadContext context, IRubyObject hash, String symbol) {
+        if (hash == null || !(hash instanceof RubyHash)) return context.nil;
 
-        IRubyObject value = ((RubyHash) hash).fastARef(runtime.newSymbol(symbol));
+        IRubyObject value = ((RubyHash) hash).fastARef(Convert.asSymbol(context, symbol));
 
-        return value == null ? runtime.getNil() : value;
+        return value == null ? context.nil : value;
     }
 
+    // MRI: rb_ascii8bit_encoding
     public static Encoding ascii8bitEncoding(Ruby runtime) {
         return runtime.getEncodingService().getAscii8bitEncoding();
     }
 
-    static final int VMODE = 0;
-    static final int PERM = 1;
-
+    @Deprecated(since = "10.0.0.0")
     public static Object vmodeVperm(IRubyObject vmode, IRubyObject vperm) {
-        return new IRubyObject[] {vmode, vperm};
+        return new API.ModeAndPermission(vmode, vperm);
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static IRubyObject vmode(Object vmodeVperm) {
-        return ((IRubyObject[])vmodeVperm)[VMODE];
+        return ((API.ModeAndPermission) vmodeVperm).mode;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static void vmode(Object vmodeVperm, IRubyObject vmode) {
-        ((IRubyObject[])vmodeVperm)[VMODE] = vmode;
+        ((API.ModeAndPermission) vmodeVperm).mode = vmode;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static IRubyObject vperm(Object vmodeVperm) {
-        return ((IRubyObject[])vmodeVperm)[PERM];
+        return ((API.ModeAndPermission) vmodeVperm).permission;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static void vperm(Object vmodeVperm, IRubyObject vperm) {
-        ((IRubyObject[])vmodeVperm)[PERM] = vperm;
+        ((API.ModeAndPermission) vmodeVperm).permission = vperm;
+    }
+
+    public static IRubyObject vmode(API.ModeAndPermission vmodeVperm) {
+        return vmodeVperm.mode;
+    }
+
+    public static void vmode(API.ModeAndPermission vmodeVperm, IRubyObject vmode) {
+        vmodeVperm.mode = vmode;
+    }
+
+    public static IRubyObject vperm(API.ModeAndPermission vmodeVperm) {
+        return vmodeVperm.permission;
+    }
+
+    public static void vperm(API.ModeAndPermission vmodeVperm, IRubyObject vperm) {
+        vmodeVperm.permission = vperm;
     }
 
     public static final int MODE_BTMODE(int fmode, int a, int b, int c) {
@@ -179,6 +219,12 @@ public class EncodingUtils {
         return ecflags;
     }
 
+    @Deprecated(since = "10.0.0.0")
+    public static void extractModeEncoding(ThreadContext context,
+                                           IOEncodable ioEncodable, Object vmodeAndVperm_p, IRubyObject options, int[] oflags_p, int[] fmode_p) {
+        extractModeEncoding(context, ioEncodable, (API.ModeAndPermission) vmodeAndVperm_p, options, oflags_p, fmode_p);
+    }
+
     /*
      * This is a wacky method which is a very near port from MRI.  pm passes in
      * a permissions value and a mode value.  As a side-effect mode will get set
@@ -188,7 +234,7 @@ public class EncodingUtils {
      */
     // mri: rb_io_extract_modeenc
     public static void extractModeEncoding(ThreadContext context,
-            IOEncodable ioEncodable, Object vmodeAndVperm_p, IRubyObject options, int[] oflags_p, int[] fmode_p) {
+                                           IOEncodable ioEncodable, API.ModeAndPermission vmodeAndVperm_p, IRubyObject options, int[] oflags_p, int[] fmode_p) {
         Ruby runtime = context.runtime;
         int ecflags;
         IRubyObject[] ecopts_p = {context.nil};
@@ -203,15 +249,15 @@ public class EncodingUtils {
                 fmode_p[0] = OpenFile.READABLE;
                 oflags_p[0] = ModeFlags.RDONLY;
             } else {
-                intmode = TypeConverter.checkToInteger(context, vmode(vmodeAndVperm_p));
+                intmode = checkToInteger(context, vmode(vmodeAndVperm_p));
 
                 if (!intmode.isNil()) {
                     vmode(vmodeAndVperm_p, intmode);
-                    oflags_p[0] = RubyNumeric.num2int(intmode);
+                    oflags_p[0] = ((RubyInteger) intmode).asInt(context);
                     fmode_p[0] = ModeFlags.getOpenFileFlagsFor(oflags_p[0]);
                 } else {
                     String p = vmode(vmodeAndVperm_p).convertToString().asJavaString();
-                    fmode_p[0] = OpenFile.ioModestrFmode(runtime, p);
+                    fmode_p[0] = OpenFile.ioModestrFmode(context, p);
                     oflags_p[0] = OpenFile.ioFmodeOflags(fmode_p[0]);
                     int colonSplit = p.indexOf(":");
 
@@ -238,10 +284,10 @@ public class EncodingUtils {
                 ecopts_p[0] = context.nil;
             } else {
                 if (!hasVmode) {
-                    IRubyObject v = ((RubyHash) options).op_aref(context, runtime.newSymbol("mode"));
+                    IRubyObject v = ((RubyHash) options).op_aref(context, Convert.asSymbol(context, "mode"));
                     if (!v.isNil()) {
                         if (vmode(vmodeAndVperm_p) != null && !vmode(vmodeAndVperm_p).isNil()) {
-                            throw runtime.newArgumentError("mode specified twice");
+                            throw argumentError(context, "mode specified twice");
                         }
                         hasVmode = true;
                         vmode(vmodeAndVperm_p, v);
@@ -249,15 +295,15 @@ public class EncodingUtils {
                     }
                 }
 
-                IRubyObject v = ((RubyHash) options).op_aref(context, runtime.newSymbol("flags"));
+                IRubyObject v = ((RubyHash) options).op_aref(context, Convert.asSymbol(context, "flags"));
                 if (!v.isNil()) {
                     v = v.convertToInteger();
-                    oflags_p[0] |= RubyNumeric.num2int(v);
-                    vmode(vmodeAndVperm_p, runtime.newFixnum(oflags_p[0]));
+                    oflags_p[0] |= toInt(context, v);
+                    vmode(vmodeAndVperm_p, asFixnum(context, oflags_p[0]));
                     fmode_p[0] = ModeFlags.getOpenFileFlagsFor(oflags_p[0]);
                 }
 
-                extractBinmode(runtime, options, fmode_p);
+                extractBinmode(context, options, fmode_p);
                 // Differs from MRI but we open with ModeFlags
                 if ((fmode_p[0] & OpenFile.BINMODE) != 0) {
                     oflags_p[0] |= ModeFlags.BINARY;
@@ -269,18 +315,20 @@ public class EncodingUtils {
                     fmode_p[0] |= DEFAULT_TEXTMODE;
                 }
                 
-                v = hashARef(runtime, options, "perm");
+                v = hashARef(context, options, "perm");
                 if (!v.isNil()) {
-                    if (vperm(vmodeAndVperm_p) != null) {
-                        if (!vperm(vmodeAndVperm_p).isNil()) throw runtime.newArgumentError("perm specified twice");
-
-                        vperm(vmodeAndVperm_p, v);
+                    if (vperm(vmodeAndVperm_p) != null && !vperm(vmodeAndVperm_p).isNil()) {
+                        throw argumentError(context, "perm specified twice");
                     }
+
+                    vperm(vmodeAndVperm_p, v);
+                } else {
+                    /* perm no use, just ignore */
                 }
 
-                IRubyObject extraFlags = hashARef(runtime, options, "flags");
+                IRubyObject extraFlags = hashARef(context, options, "flags");
                 if (!extraFlags.isNil()) {
-                    oflags_p[0] |= extraFlags.convertToInteger().getIntValue();
+                    oflags_p[0] |= toInt(context, extraFlags);
                 }
 
                 ecflags = (fmode_p[0] & OpenFile.READABLE) != 0 ?
@@ -291,7 +339,7 @@ public class EncodingUtils {
                 }
 
                 if (ioExtractEncodingOption(context, ioEncodable, options, fmode_p)) {
-                    if (hasEnc) throw runtime.newArgumentError("encoding specified twice");
+                    if (hasEnc) throw argumentError(context, "encoding specified twice");
                 }
 
                 ecflags = SET_UNIVERSAL_NEWLINE_DECORATOR_IF_ENC2(ioEncodable.getEnc2(), ecflags);
@@ -308,8 +356,6 @@ public class EncodingUtils {
 
     // mri: rb_io_extract_encoding_option
     public static boolean ioExtractEncodingOption(ThreadContext context, IOEncodable ioEncodable, IRubyObject options, int[] fmode_p) {
-        Ruby runtime = context.runtime;
-
         IRubyObject encoding = context.nil;
         IRubyObject extenc = null;
         IRubyObject intenc = null;
@@ -321,16 +367,16 @@ public class EncodingUtils {
         if (options != null && !options.isNil()) {
             RubyHash opts = (RubyHash) options;
 
-            IRubyObject encodingOpt = opts.op_aref(context, runtime.newSymbol("encoding"));
+            IRubyObject encodingOpt = opts.op_aref(context, asSymbol(context, "encoding"));
             if (!encodingOpt.isNil()) encoding = encodingOpt;
-            IRubyObject externalOpt = opts.op_aref(context, runtime.newSymbol("external_encoding"));
+            IRubyObject externalOpt = opts.op_aref(context, asSymbol(context, "external_encoding"));
             if (!externalOpt.isNil()) extenc = externalOpt;
-            IRubyObject internalOpt = opts.op_aref(context, runtime.newSymbol("internal_encoding"));
+            IRubyObject internalOpt = opts.op_aref(context, asSymbol(context, "internal_encoding"));
             if (!internalOpt.isNil()) intenc = internalOpt;
         }
 
         if ((extenc != null || intenc != null) && !encoding.isNil()) {
-            runtime.getWarnings().warn("Ignoring encoding parameter '" + encoding + "': " +
+            warn(context, "Ignoring encoding parameter '" + encoding + "': " +
                     (extenc == null ? "internal" : "external") + "_encoding is used");
             encoding = context.nil;
         }
@@ -385,14 +431,14 @@ public class EncodingUtils {
 
         /* no default_internal or same encoding, no conversion */
         Encoding internalEncoding = runtime.getDefaultInternalEncoding();
-        if (internalEncoding == null || encoding == internalEncoding) return newString(runtime, string, encoding);
+        if (internalEncoding == null || encoding == internalEncoding) return RubyString.newString(runtime, string, encoding);
 
         /* ASCII compatible, and ASCII only string, no conversion in
          * default_internal */
         if ((encoding == ASCIIEncoding.INSTANCE) ||
                 (encoding == USASCIIEncoding.INSTANCE) ||
                 (encoding.isAsciiCompatible() && searchNonAscii(string) == -1)) {
-            return newString(runtime, string, internalEncoding);
+            return RubyString.newString(runtime, string, internalEncoding);
         }
 
         /* convert from the given encoding to default_internal */
@@ -403,7 +449,7 @@ public class EncodingUtils {
             ByteList other = encodeBytelist(string, encoding);
             convertedString.catWithCodeRange(other, CR_UNKNOWN);
         } catch (org.jruby.exceptions.EncodingError.CompatibilityError ce) {
-            return newString(runtime, string, encoding);
+            return RubyString.newString(runtime, string, encoding);
         }
 
         return convertedString;
@@ -421,14 +467,14 @@ public class EncodingUtils {
 
         /* no default_internal or same encoding, no conversion */
         Encoding internalEncoding = runtime.getDefaultInternalEncoding();
-        if (internalEncoding == null || encoding == internalEncoding) return newString(runtime, bytelist, encoding);
+        if (internalEncoding == null || encoding == internalEncoding) return RubyString.newString(runtime, bytelist, encoding);
 
         /* ASCII compatible, and ASCII only string, no conversion in
          * default_internal */
         if ((encoding == ASCIIEncoding.INSTANCE) ||
                 (encoding == USASCIIEncoding.INSTANCE) ||
                 (encoding.isAsciiCompatible() && searchNonAscii(bytelist) == -1)) {
-            return newString(runtime, bytelist, internalEncoding);
+            return RubyString.newString(runtime, bytelist, internalEncoding);
         }
 
         /* convert from the given encoding to default_internal */
@@ -439,7 +485,7 @@ public class EncodingUtils {
             ByteList other = encodeBytelist(bytelist, encoding);
             convertedString.catWithCodeRange(other, CR_UNKNOWN);
         } catch (org.jruby.exceptions.EncodingError.CompatibilityError ce) {
-            return newString(runtime, bytelist, encoding);
+            return RubyString.newString(runtime, bytelist, encoding);
         }
 
         return convertedString;
@@ -472,8 +518,7 @@ public class EncodingUtils {
 
     // mri: parse_mode_enc
     public static void parseModeEncoding(ThreadContext context, IOEncodable ioEncodable, String option, int[] fmode_p) {
-        final Ruby runtime = context.runtime;
-        EncodingService service = runtime.getEncodingService();
+        EncodingService service = encodingService(context);
         Encoding intEnc, extEnc;
         if (fmode_p == null) fmode_p = new int[]{0};
 
@@ -487,7 +532,7 @@ public class EncodingUtils {
                 fmode_p[0] |= OpenFile.SETENC_BY_BOM;
                 ioEncodable.setBOM(true);
             } else {
-                runtime.getWarnings().warn("BOM with non-UTF encoding " + estr + " is nonsense");
+                warn(context, "BOM with non-UTF encoding " + estr + " is nonsense");
                 fmode_p[0] &= ~OpenFile.SETENC_BY_BOM;
             }
         }
@@ -495,7 +540,7 @@ public class EncodingUtils {
         Encoding idx = service.findEncodingNoError(new ByteList(estr.getBytes(), false));
 
         if (idx == null) {
-            runtime.getWarnings().warn("Unsupported encoding " + estr + " ignored");
+            warn(context, "Unsupported encoding " + estr + " ignored");
             extEnc = null;
         } else {
             extEnc = idx;
@@ -509,7 +554,7 @@ public class EncodingUtils {
             } else {
                 idx = service.getEncodingFromString(istr);
                 if (idx == null) {
-                    runtime.getWarnings().warn("ignoring internal encoding " + idx + ": it is identical to external encoding " + idx);
+                    warn(context, "ignoring internal encoding " + idx + ": it is identical to external encoding " + idx);
                     intEnc = null;
                 } else {
                     intEnc = idx;
@@ -569,7 +614,7 @@ public class EncodingUtils {
             if ((dst.getUnsafeBytes().length - dst.getBegin()) - dlen < length + maxOutput) {
                 long newCapa = dlen + length + maxOutput;
                 if (Integer.MAX_VALUE < newCapa) {
-                    throw context.runtime.newArgumentError("too long string");
+                    throw argumentError(context, "too long string");
                 }
                 dst.ensure((int)newCapa);
                 dst.setRealSize(dlen);
@@ -592,7 +637,7 @@ public class EncodingUtils {
 
     // rb_econv_check_error
     public static void econvCheckError(ThreadContext context, EConv ec) {
-        RaiseException re = makeEconvException(context.runtime, ec);
+        RaiseException re = makeEconvException(context, ec);
         if (re != null) throw re;
     }
 
@@ -614,18 +659,20 @@ public class EncodingUtils {
         RubyHash optHash2 = (RubyHash)opthash;
         ecflags = econvOpts(context, opthash, ecflags);
 
-        v = optHash2.op_aref(context, context.runtime.newSymbol("replace"));
+        RubySymbol replaceSymbol = asSymbol(context, "replace");
+        v = optHash2.op_aref(context, replaceSymbol);
         if (!v.isNil()) {
             RubyString v_str = v.convertToString();
             if (v_str.scanForCodeRange() == StringSupport.CR_BROKEN) {
-                throw context.runtime.newArgumentError("replacement string is broken: " + v_str);
+                throw argumentError(context, "replacement string is broken: " + v_str);
             }
-            v = v_str.freeze(context);
-            newhash = RubyHash.newHash(context.runtime);
-            ((RubyHash)newhash).op_aset(context, context.runtime.newSymbol("replace"), v);
+            v = v_str.newFrozen();
+            newhash = newHash(context);
+            ((RubyHash)newhash).op_aset(context, replaceSymbol, v);
         }
 
-        v = optHash2.op_aref(context, context.runtime.newSymbol("fallback"));
+        RubySymbol fallbackSymbol = asSymbol(context, "fallback");
+        v = optHash2.op_aref(context, fallbackSymbol);
         if (!v.isNil()) {
             IRubyObject h = TypeConverter.checkHashType(context.runtime, v);
             boolean condition;
@@ -637,16 +684,14 @@ public class EncodingUtils {
             }
 
             if (condition) {
-                if (newhash.isNil()) {
-                    newhash = RubyHash.newHash(context.runtime);
-                }
-                ((RubyHash)newhash).op_aset(context, context.runtime.newSymbol("fallback"), v);
+                if (newhash.isNil()) newhash = newHash(context);
+
+                ((RubyHash)newhash).op_aset(context, fallbackSymbol, v);
             }
         }
 
-        if (!newhash.isNil()) {
-            newhash.setFrozen(true);
-        }
+        if (!newhash.isNil()) newhash.setFrozen(true);
+
         opts[0] = newhash;
 
         return ecflags;
@@ -654,42 +699,35 @@ public class EncodingUtils {
 
     // econv_opts
     public static int econvOpts(ThreadContext context, IRubyObject opt, int ecflags) {
-        Ruby runtime = context.runtime;
-        IRubyObject v;
-
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("invalid"));
-        if (v.isNil()) {
-        } else if (v.toString().equals("replace")) {
+        IRubyObject v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "invalid"));
+        if (!v.isNil()) {
+            if (!v.toString().equals("replace")) throw argumentError(context, "unknown value for invalid character option");
             ecflags |= EConvFlags.INVALID_REPLACE;
-        } else {
-            throw runtime.newArgumentError("unknown value for invalid character option");
         }
 
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("undef"));
-        if (v.isNil()) {
-        } else if (v.toString().equals("replace")) {
-            ecflags |= EConvFlags.UNDEF_REPLACE;
-        } else {
-            throw runtime.newArgumentError("unknown value for undefined character option");
-        }
-
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("replace"));
-        if (!v.isNil() && (ecflags & EConvFlags.INVALID_REPLACE) != 0) {
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "undef"));
+        if (!v.isNil()) {
+            if (!v.toString().equals("replace")) throw argumentError(context, "unknown value for undefined character option");
             ecflags |= EConvFlags.UNDEF_REPLACE;
         }
 
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("xml"));
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "replace"));
+        if (!v.isNil() && (ecflags & EConvFlags.INVALID_REPLACE) == 0) {
+            ecflags |= EConvFlags.UNDEF_REPLACE;
+        }
+
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "xml"));
         if (!v.isNil()) {
             if (v.toString().equals("text")) {
                 ecflags |= EConvFlags.XML_TEXT_DECORATOR | EConvFlags.UNDEF_HEX_CHARREF;
             } else if (v.toString().equals("attr")) {
                 ecflags |= EConvFlags.XML_ATTR_CONTENT_DECORATOR | EConvFlags.XML_ATTR_QUOTE_DECORATOR | EConvFlags.UNDEF_HEX_CHARREF;
             } else {
-                throw runtime.newArgumentError("unexpected value for xml option: " + v);
+                throw argumentError(context, "unexpected value for xml option: " + v);
             }
         }
 
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("newline"));
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "newline"));
         if (!v.isNil()) {
             ecflags &= ~EConvFlags.NEWLINE_DECORATOR_MASK;
             if (v.toString().equals("universal")) {
@@ -699,34 +737,40 @@ public class EncodingUtils {
             } else if (v.toString().equals("cr")) {
                 ecflags |= EConvFlags.CR_NEWLINE_DECORATOR;
             } else if (v.toString().equals("lf")) {
-//                ecflags |= ECONV_LF_NEWLINE_DECORATOR;
-            } else if (v instanceof RubySymbol) {
-                throw runtime.newArgumentError("unexpected value for newline option: " + ((RubySymbol) v).to_s(context).toString());
+                ecflags |= EConvFlags.LF_NEWLINE_DECORATOR;
+            } else if (v instanceof RubySymbol sym) {
+                throw argumentError(context, "unexpected value for newline option: " + sym.to_s(context).toString());
             } else {
-                throw runtime.newArgumentError("unexpected value for newline option");
+                throw argumentError(context, "unexpected value for newline option");
             }
         }
 
         int setflags = 0;
         boolean newlineflag = false;
 
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("universal_newline"));
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "universal_newline"));
         if (v.isTrue()) {
             setflags |= EConvFlags.UNIVERSAL_NEWLINE_DECORATOR;
         }
         newlineflag |= !v.isNil();
 
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("crlf_newline"));
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "crlf_newline"));
         if (v.isTrue()) {
             setflags |= EConvFlags.CRLF_NEWLINE_DECORATOR;
         }
         newlineflag |= !v.isNil();
 
-        v = ((RubyHash)opt).op_aref(context, runtime.newSymbol("cr_newline"));
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "cr_newline"));
         if (v.isTrue()) {
             setflags |= EConvFlags.CR_NEWLINE_DECORATOR;
         }
         newlineflag |= !v.isNil();
+
+        v = ((RubyHash)opt).op_aref(context, Convert.asSymbol(context, "lf_newline"));
+        if (v.isTrue()) {
+            setflags |= EConvFlags.LF_NEWLINE_DECORATOR;
+        }
+        newlineflag |= !v.isNil();        
 
         if (newlineflag) {
             ecflags &= ~EConvFlags.NEWLINE_DECORATOR_MASK;
@@ -738,16 +782,15 @@ public class EncodingUtils {
 
     // rb_econv_open_opts
     public static EConv econvOpenOpts(ThreadContext context, byte[] sourceEncoding, byte[] destinationEncoding, int ecflags, IRubyObject opthash) {
-        Ruby runtime = context.runtime;
         IRubyObject replacement;
 
         if (opthash == null || opthash.isNil()) {
             replacement = context.nil;
         } else {
-            if (!(opthash instanceof RubyHash) || !opthash.isFrozen()) {
-                throw runtime.newRuntimeError("bug: EncodingUtils.econvOpenOpts called with invalid opthash");
+            if (!(opthash instanceof RubyHash hash) || !opthash.isFrozen()) {
+                throw runtimeError(context, "bug: EncodingUtils.econvOpenOpts called with invalid opthash");
             }
-            replacement = ((RubyHash)opthash).op_aref(context, runtime.newSymbol("replace"));
+            replacement = hash.op_aref(context, asSymbol(context, "replace"));
         }
 
         EConv ec = TranscoderDB.open(sourceEncoding, destinationEncoding, ecflags);
@@ -860,15 +903,12 @@ public class EncodingUtils {
 
     // rb_to_encoding_index
     public static Encoding toEncodingIndex(ThreadContext context, IRubyObject enc) {
-        if (enc instanceof RubyEncoding) {
-            return ((RubyEncoding)enc).getEncoding();
-        } else if ((enc = enc.checkStringType()).isNil()) {
-            return null;
-        }
-        if (!((RubyString)enc).getEncoding().isAsciiCompatible()) {
-            return null;
-        }
-        return context.runtime.getEncodingService().getEncodingFromObjectNoError(enc);
+        if (enc instanceof RubyEncoding encoding) return encoding.getEncoding();
+        enc = enc.checkStringType();
+        if (enc.isNil()) return null;
+        if (!((RubyString)enc).getEncoding().isAsciiCompatible()) return null;
+
+        return encodingService(context).getEncodingFromObjectNoError(enc);
     }
 
     // encoded_dup
@@ -934,7 +974,22 @@ public class EncodingUtils {
         return strTranscode1(context, to, (RubyString) str, ecflags, ecopt, EncodingUtils::encodedDup);
     }
 
-    // rb_str_encode
+    /**
+     * A version of rbStrEncode that works directly with bytes.
+     *
+     * MRI: rb_str_encode but consuming only a byte array range and producing a ByteList.
+     *
+     * @param context
+     * @param bytes
+     * @param start
+     * @param length
+     * @param encoding
+     * @param cr
+     * @param to
+     * @param ecflags
+     * @param ecopt
+     * @return
+     */
     public static ByteList rbByteEncode(ThreadContext context, byte[] bytes, int start, int length, Encoding encoding, int cr, Encoding to, int ecflags, IRubyObject ecopt) {
         byte[] sname, dname;
 
@@ -942,10 +997,8 @@ public class EncodingUtils {
         dname = to.getName();
 
         if (noDecorators(ecflags)) {
-            if (encoding.isAsciiCompatible() && to.isAsciiCompatible()) {
-                if (cr == StringSupport.CR_7BIT) {
-                    return null;
-                }
+            if (is7BitCompat(cr, encoding, to)) {
+                return null;
             } else if (encodingEqual(sname, dname)) {
                 return null;
             }
@@ -963,7 +1016,7 @@ public class EncodingUtils {
         transcodeLoop(context, bytes, fromPos, dest.unsafeBytes(), new Ptr(destBegin), start + slen, destBegin + blen, dest, strTranscodingResize, sname, dname, ecflags, ecopt);
 
         if (fromPos.p != start + slen) {
-            throw context.runtime.newArgumentError("not fully converted, " + (slen - fromPos.p) + " bytes left");
+            throw argumentError(context, "not fully converted, " + (slen - fromPos.p) + " bytes left");
         }
 
         dest.setEncoding(to);
@@ -999,7 +1052,7 @@ public class EncodingUtils {
     public static IRubyObject strTranscode(ThreadContext context, IRubyObject toEncoding, IRubyObject forcedEncoding, IRubyObject opts, RubyString str, TranscodeResult result) {
         IRubyObject tmp = TypeConverter.checkHashType(context.runtime, opts);
         if (tmp.isNil()) {
-            throw context.runtime.newArgumentError(3, 0, 2);
+            throw argumentError(context, 3, 0, 2);
         }
 
         IRubyObject[] ecopts_p = {context.nil};
@@ -1008,17 +1061,13 @@ public class EncodingUtils {
     }
 
     private static IRubyObject strTranscode0(ThreadContext context, RubyString str, int ecflags, IRubyObject ecopts, TranscodeResult result) {
-        IRubyObject toEncoding = context.runtime.getEncodingService().getDefaultInternal();
+        IRubyObject toEncoding = encodingService(context).getDefaultInternal();
         if (toEncoding == null || toEncoding.isNil()) {
             if (ecflags == 0) return result.apply(context, str, null, str);
             toEncoding = objEncoding(context, str);
         }
 
-        boolean explicitlyInvalidReplace = true;
-        if ((ecflags & EConvFlags.INVALID_MASK) == 0) {
-            explicitlyInvalidReplace = false;
-        }
-
+        boolean explicitlyInvalidReplace = (ecflags & EConvFlags.INVALID_MASK) != 0;
         ecflags |= EConvFlags.INVALID_REPLACE | EConvFlags.UNDEF_REPLACE;
 
         return strTranscode(context, toEncoding, context.nil, str, ecflags, ecopts, result, explicitlyInvalidReplace);
@@ -1047,8 +1096,6 @@ public class EncodingUtils {
     }
 
     private static RubyString strTranscode(ThreadContext context, IRubyObject toEncoding, IRubyObject forceEncoding, RubyString str, int ecflags, IRubyObject ecopts, TranscodeResult result, boolean explicitlyInvalidReplace) {
-        Ruby runtime = context.runtime;
-
         // simplified strTranscodeEncArgs logic to avoid the carrier arrays
         Encoding denc = toEncodingIndex(context, toEncoding);
         byte[] dname = (denc == null) ? toEncoding.convertToString().getBytes() : denc.getName();
@@ -1078,7 +1125,7 @@ public class EncodingUtils {
         ByteList fromp = sp;
         int slen = str.size();
         int blen = slen + 30;
-        dest = RubyString.newStringLight(runtime, blen);
+        dest = RubyString.newStringLight(context.runtime, blen);
         ByteList destp = dest.getByteList();
 
         byte[] frompBytes = fromp.unsafeBytes();
@@ -1088,14 +1135,12 @@ public class EncodingUtils {
         transcodeLoop(context, frompBytes, frompPos, destpBytes, destpPos, frompPos.p + slen, destpPos.p + blen, destp, strTranscodingResize, sname, dname, ecflags, ecopts);
 
         if (frompPos.p != sp.begin() + slen) {
-            throw runtime.newArgumentError("not fully converted, " + (slen - frompPos.p) + " bytes left");
+            throw argumentError(context, "not fully converted, " + (slen - frompPos.p) + " bytes left");
         }
 
         // MRI sets length of dest here, but we've already done it in the inner transcodeLoop
 
-        if (denc == null) {
-            denc = defineDummyEncoding(context, dname);
-        }
+        if (denc == null) denc = defineDummyEncoding(context, dname);
 
         return result.apply(context, str, denc, dest);
     }
@@ -1106,12 +1151,18 @@ public class EncodingUtils {
                 && str.scanForCodeRange() == StringSupport.CR_7BIT;
     }
 
+    private static boolean is7BitCompat(int cr, Encoding denc, Encoding senc) {
+        return senc != null && denc != null
+                && senc.isAsciiCompatible() && denc.isAsciiCompatible()
+                && cr == StringSupport.CR_7BIT;
+    }
+
     private static RubyString strTranscodeScrub(ThreadContext context, IRubyObject forceEncoding, RubyString str, int ecflags, IRubyObject ecopts, TranscodeResult result, boolean explicitlyInvalidReplace, Encoding denc, Encoding senc) {
         RubyString dest = str;
         if ((ecflags & EConvFlags.INVALID_MASK) != 0 && explicitlyInvalidReplace) {
             IRubyObject rep = context.nil;
             if (!ecopts.isNil()) {
-                rep = ((RubyHash) ecopts).op_aref(context, context.runtime.newSymbol("replace"));
+                rep = ((RubyHash) ecopts).op_aref(context, asSymbol(context, "replace"));
             }
             IRubyObject scrubbed = str.encStrScrub(context, senc, rep, Block.NULL_BLOCK);
             if (!scrubbed.isNil()) {
@@ -1126,10 +1177,8 @@ public class EncodingUtils {
     // rb_obj_encoding
     public static IRubyObject objEncoding(ThreadContext context, IRubyObject obj) {
         Encoding enc = encGet(context, obj);
-        if (enc == null) {
-            throw context.runtime.newTypeError("unknown encoding");
-        }
-        return context.runtime.getEncodingService().convertEncodingToRubyEncoding(enc);
+        if (enc == null) throw typeError(context, "unknown encoding");
+        return encodingService(context).convertEncodingToRubyEncoding(enc);
     }
 
     public static Encoding strTranscodeEncArgs(ThreadContext context, IRubyObject str, IRubyObject arg1, IRubyObject arg2, byte[][] sname_p, Encoding[] senc_p, byte[][] dname_p, Encoding[] denc_p) {
@@ -1154,7 +1203,7 @@ public class EncodingUtils {
     // enc_check_duplication
     public static void encCheckDuplication(ThreadContext context, byte[] name) {
         if (encRegistered(name)) {
-            throw context.runtime.newArgumentError("encoding " + new String(name) + " is already registered");
+            throw argumentError(context, "encoding " + new String(name) + " is already registered");
         }
     }
 
@@ -1181,7 +1230,7 @@ public class EncodingUtils {
                                             Encoding toEncoding, int ecflags, IRubyObject ecopts) {
         return strConvEncOpts(
                 context,
-                newString(context.runtime, str),
+                newString(context, str),
                 fromEncoding, toEncoding, ecflags, ecopts).getByteList();
     }
 
@@ -1258,7 +1307,7 @@ public class EncodingUtils {
                 len = dp.p;
                 newStr.setRealSize(len);
                 newStr.setEncoding(toEncoding);
-                return newString(context.runtime, newStr);
+                return newString(context, newStr);
 
             default:
                 // some error, return original
@@ -1284,7 +1333,7 @@ public class EncodingUtils {
             str = obj.convertToString();
             int clen = str.size();
             if (clen >= len) {
-                str.modify();
+                str.modifyAndClearCodeRange();
                 return str;
             }
             str.modifyExpand(len);
@@ -1392,14 +1441,13 @@ public class EncodingUtils {
     private static abstract class AbstractTranscodeFallback implements TranscodeFallback<IRubyObject> {
         @Override
         public boolean call(ThreadContext context, IRubyObject fallback, EConv ec) {
-            Ruby runtime = context.runtime;
             IRubyObject rep = RubyString.newStringNoCopy(
-                    runtime,
+                    context.runtime,
                     new ByteList(
                             ec.lastError.getErrorBytes(),
                             ec.lastError.getErrorBytesP(),
                             ec.lastError.getErrorBytesLength(),
-                            runtime.getEncodingService().findEncodingOrAliasEntry(ec.lastError.getSource()).getEncoding(),
+                            encodingService(context).findEncodingOrAliasEntry(ec.lastError.getSource()).getEncoding(),
                             false)
             );
             rep = innerCall(context, fallback, rep);
@@ -1454,7 +1502,6 @@ public class EncodingUtils {
      * MRI: transcode_loop Ruby-related bits
      */
     public static void transcodeLoop(ThreadContext context, byte[] inBytes, Ptr inPos, byte[] outBytes, Ptr outPos, int inStop, int _outStop, ByteList destination, ResizeFunction resizeFunction, byte[] sname, byte[] dname, int ecflags, IRubyObject ecopts) {
-        Ruby runtime = context.runtime;
         EConv ec;
         IRubyObject fallback = context.nil;
         TranscodeFallback fallbackFunc = null;
@@ -1466,7 +1513,7 @@ public class EncodingUtils {
         }
 
         if (!ecopts.isNil() && ecopts instanceof RubyHash) {
-            fallback = ((RubyHash)ecopts).op_aref(context, runtime.newSymbol("fallback"));
+            fallback = ((RubyHash)ecopts).op_aref(context, asSymbol(context, "fallback"));
             if (fallback instanceof RubyHash) {
                 fallbackFunc = HASH_FALLBACK;
             } else if (fallback instanceof RubyProc) { // not quite same check as MRI
@@ -1481,7 +1528,7 @@ public class EncodingUtils {
         boolean success = transcodeLoop(ec, fallbackFunc, context, fallback, inBytes, inPos, outBytes, outPos, inStop, _outStop, destination, resizeFunction);
 
         if (!success) {
-            RaiseException re = makeEconvException(runtime, ec);
+            RaiseException re = makeEconvException(context, ec);
             ec.close();
             throw re;
         }
@@ -1577,7 +1624,7 @@ public class EncodingUtils {
                     ret == EConvResult.IncompleteInput ||
                     ret == EConvResult.UndefinedConversion) {
 
-                RaiseException exc = makeEconvException(context.runtime, ec);
+                RaiseException exc = makeEconvException(context, ec);
 
                 ec.close();
 
@@ -1600,8 +1647,13 @@ public class EncodingUtils {
         }
     }
 
-    // make_econv_exception
+    @Deprecated(since = "10.0.0.0")
     public static RaiseException makeEconvException(Ruby runtime, EConv ec) {
+        return makeEconvException(runtime.getCurrentContext(), ec);
+    }
+
+    // make_econv_exception
+    public static RaiseException makeEconvException(ThreadContext context, EConv ec) {
         final StringBuilder mesg; RaiseException exc;
 
         final EConvResult result = ec.lastError.getResult();
@@ -1609,28 +1661,27 @@ public class EncodingUtils {
             byte[] errBytes = ec.lastError.getErrorBytes();
             int errBytesP = ec.lastError.getErrorBytesP();
             int errorLen = ec.lastError.getErrorBytesLength();
-            ByteList _bytes = new ByteList(errBytes, errBytesP, errorLen - errBytesP);
-            RubyString bytes = newString(runtime, _bytes);
-            RubyString dumped = (RubyString)bytes.dump();
+            RubyString bytes = newString(context, new ByteList(errBytes, errBytesP, errorLen - errBytesP));
+            RubyString dumped = (RubyString)bytes.dump(context);
             int readagainLen = ec.lastError.getReadAgainLength();
-            IRubyObject bytes2 = runtime.getNil();
+            IRubyObject bytes2 = context.nil;
             mesg = new StringBuilder();
             if (result == EConvResult.IncompleteInput) {
                 mesg.append("incomplete ").append(dumped).append(" on ").append(new String(ec.lastError.getSource()));
             } else if (readagainLen != 0) {
-                bytes2 = newString(runtime, new ByteList(errBytes, errorLen + errBytesP, ec.lastError.getReadAgainLength()));
-                IRubyObject dumped2 = ((RubyString) bytes2).dump();
+                bytes2 = newString(context, new ByteList(errBytes, errorLen + errBytesP, ec.lastError.getReadAgainLength()));
+                IRubyObject dumped2 = ((RubyString) bytes2).dump(context);
                 mesg.append(dumped).append(" followed by ").append(dumped2).append(" on ").append( new String(ec.lastError.getSource()) );
             } else {
                 mesg.append(dumped).append(" on ").append( new String(ec.lastError.getSource()) );
             }
 
-            exc = runtime.newInvalidByteSequenceError(mesg.toString());
+            exc = context.runtime.newInvalidByteSequenceError(mesg.toString());
             exc.getException().setInternalVariable("error_bytes", bytes);
             exc.getException().setInternalVariable("readagain_bytes", bytes2);
-            exc.getException().setInternalVariable("incomplete_input", result == EConvResult.IncompleteInput ? runtime.getTrue() : runtime.getFalse());
+            exc.getException().setInternalVariable("incomplete_input", asBoolean(context, result == EConvResult.IncompleteInput));
 
-            return makeEConvExceptionSetEncs(exc, runtime, ec);
+            return makeEConvExceptionSetEncs(context, exc, ec);
         }
         else if (result == EConvResult.UndefinedConversion) {
             byte[] errBytes = ec.lastError.getErrorBytes();
@@ -1641,8 +1692,8 @@ public class EncodingUtils {
                 // prepare dumped form
             }
 
-            RubyString bytes = newString(runtime, new ByteList(errBytes, errBytesP, errorLen - errBytesP));
-            RubyString dumped = (RubyString) bytes.dump();
+            RubyString bytes = newString(context, new ByteList(errBytes, errBytesP, errorLen - errBytesP));
+            RubyString dumped = (RubyString) bytes.dump(context);
 
             mesg = new StringBuilder();
             if (Arrays.equals(errSource, ec.source) &&  Arrays.equals(ec.lastError.getDestination(), ec.destination)) {
@@ -1654,30 +1705,31 @@ public class EncodingUtils {
                 }
             }
 
-            exc = runtime.newUndefinedConversionError(mesg.toString());
+            exc = context.runtime.newUndefinedConversionError(mesg.toString());
 
-            EncodingDB.Entry entry = runtime.getEncodingService().findEncodingOrAliasEntry(errSource);
+            EncodingDB.Entry entry = encodingService(context).findEncodingOrAliasEntry(errSource);
             if (entry != null) {
                 bytes.setEncoding(entry.getEncoding());
                 exc.getException().setInternalVariable("error_char", bytes);
             }
 
-            return makeEConvExceptionSetEncs(exc, runtime, ec);
+            return makeEConvExceptionSetEncs(context, exc, ec);
         }
         return null;
     }
 
-    private static RaiseException makeEConvExceptionSetEncs(RaiseException exc, Ruby runtime, EConv ec) {
-        exc.getException().setInternalVariable("source_encoding_name", newString(runtime, ec.lastError.getSource()));
-        exc.getException().setInternalVariable("destination_encoding_name", newString(runtime, ec.lastError.getDestination()));
+    private static RaiseException makeEConvExceptionSetEncs(ThreadContext context, RaiseException exc, EConv ec) {
+        exc.getException().setInternalVariable("source_encoding_name", newString(context, ec.lastError.getSource()));
+        exc.getException().setInternalVariable("destination_encoding_name", newString(context, ec.lastError.getDestination()));
 
-        EncodingDB.Entry entry = runtime.getEncodingService().findEncodingOrAliasEntry(ec.lastError.getSource());
+        var encodingService = encodingService(context);
+        EncodingDB.Entry entry = encodingService.findEncodingOrAliasEntry(ec.lastError.getSource());
         if (entry != null) {
-            exc.getException().setInternalVariable("source_encoding", runtime.getEncodingService().convertEncodingToRubyEncoding(entry.getEncoding()));
+            exc.getException().setInternalVariable("source_encoding", encodingService.convertEncodingToRubyEncoding(entry.getEncoding()));
         }
-        entry = runtime.getEncodingService().findEncodingOrAliasEntry(ec.lastError.getDestination());
+        entry = encodingService.findEncodingOrAliasEntry(ec.lastError.getDestination());
         if (entry != null) {
-            exc.getException().setInternalVariable("destination_encoding", runtime.getEncodingService().convertEncodingToRubyEncoding(entry.getEncoding()));
+            exc.getException().setInternalVariable("destination_encoding", encodingService.convertEncodingToRubyEncoding(entry.getEncoding()));
         }
 
         return exc;
@@ -1694,15 +1746,14 @@ public class EncodingUtils {
 
     // MRI: io_set_encoding_by_bom
     public static Encoding ioSetEncodingByBOM(ThreadContext context, RubyIO io) {
-        Ruby runtime = context.runtime;
         Encoding bomEncoding = ioStripBOM(context, io);
 
         if (bomEncoding != null) {
             // FIXME: Wonky that we acquire RubyEncoding to pass these encodings through
-            IRubyObject theBom = runtime.getEncodingService().getEncoding(bomEncoding);
+            IRubyObject theBom = encodingService(context).getEncoding(bomEncoding);
             IRubyObject theInternal = io.internal_encoding(context);
 
-            io.setEncoding(runtime.getCurrentContext(), theBom, theInternal, context.nil);
+            io.setEncoding(context, theBom, theInternal, context.nil);
         } else {
             io.setEnc2(null);
         }
@@ -1711,16 +1762,19 @@ public class EncodingUtils {
 
     // MRI: io_strip_bom
     public static Encoding ioStripBOM(ThreadContext context, RubyIO io) {
-        IRubyObject b1, b2, b3, b4;
+        IRubyObject b2, b3, b4;
 
         if ((io.getOpenFile().getMode() & OpenFile.READABLE) == 0) return null;
-        if ((b1 = io.getbyte(context)).isNil()) return null;
 
-        switch ((int)((RubyFixnum)b1).getLongValue()) {
+        IRubyObject b1Arg = io.getbyte(context);
+        if (b1Arg.isNil()) return null;
+        RubyFixnum b1 = (RubyFixnum) b1Arg;
+
+        switch ((int) b1.getValue()) {
             case 0xEF:
                 if ((b2 = io.getbyte(context)).isNil()) break;
-                if (b2 instanceof RubyFixnum && ((RubyFixnum)b2).getLongValue() == 0xBB && !(b3 = io.getbyte(context)).isNil()) {
-                    if (((RubyFixnum)b3).getLongValue() == 0xBF) {
+                if (((RubyFixnum) b2).getValue() == 0xBB && !(b3 = io.getbyte(context)).isNil()) {
+                    if (((RubyFixnum) b3).getValue() == 0xBF) {
                         return UTF8Encoding.INSTANCE;
                     }
                     io.ungetbyte(context, b3);
@@ -1729,17 +1783,17 @@ public class EncodingUtils {
                 break;
             case 0xFE:
                 if ((b2 = io.getbyte(context)).isNil()) break;
-                if (b2 instanceof RubyFixnum && ((RubyFixnum)b2).getLongValue() == 0xFF) {
+                if (((RubyFixnum) b2).asLong(context) == 0xFF) {
                     return UTF16BEEncoding.INSTANCE;
                 }
                 io.ungetbyte(context, b2);
                 break;
             case 0xFF:
                 if ((b2 = io.getbyte(context)).isNil()) break;
-                if (b2 instanceof RubyFixnum && ((RubyFixnum)b2).getLongValue() == 0xFE) {
+                if (((RubyFixnum) b2).asLong(context) == 0xFE) {
                     b3 = io.getbyte(context);
-                    if (b3 instanceof RubyFixnum && ((RubyFixnum)b3).getLongValue() == 0 && !(b4 = io.getbyte(context)).isNil()) {
-                        if (((RubyFixnum)b4).getLongValue() == 0) {
+                    if (b3 instanceof RubyFixnum b3fix && b3fix.asLong(context) == 0 && !(b4 = io.getbyte(context)).isNil()) {
+                        if (((RubyFixnum)b4).getValue() == 0) {
                             return UTF32LEEncoding.INSTANCE;
                         }
                         io.ungetbyte(context, b4);
@@ -1753,9 +1807,9 @@ public class EncodingUtils {
                 break;
             case 0:
                 if ((b2 = io.getbyte(context)).isNil()) break;
-                if (b2 instanceof RubyFixnum && ((RubyFixnum)b2).getLongValue() == 0 && !(b3 = io.getbyte(context)).isNil()) {
-                    if (b3 instanceof RubyFixnum && ((RubyFixnum)b3).getLongValue() == 0xFE && !(b4 = io.getbyte(context)).isNil()) {
-                        if (b4 instanceof RubyFixnum && ((RubyFixnum)b4).getLongValue() == 0xFF) {
+                if (((RubyFixnum) b2).getValue() == 0 && !(b3 = io.getbyte(context)).isNil()) {
+                    if (((RubyFixnum) b3).getValue() == 0xFE && !(b4 = io.getbyte(context)).isNil()) {
+                        if (((RubyFixnum) b4).getValue() == 0xFF) {
                             return UTF32BEEncoding.INSTANCE;
                         }
                         io.ungetbyte(context, b4);
@@ -1771,18 +1825,17 @@ public class EncodingUtils {
 
     // validate_enc_binmode
     public static void validateEncodingBinmode(ThreadContext context, int[] fmode_p, int ecflags, IOEncodable ioEncodable) {
-        Ruby runtime = context.runtime;
         int fmode = fmode_p[0];
 
         if ((fmode & OpenFile.READABLE) != 0 &&
                 ioEncodable.getEnc2() == null &&
                 (fmode & OpenFile.BINMODE) == 0 &&
-                !(ioEncodable.getEnc() != null ? ioEncodable.getEnc() : runtime.getDefaultExternalEncoding()).isAsciiCompatible()) {
-            throw runtime.newArgumentError("ASCII incompatible encoding needs binmode");
+                !(ioEncodable.getEnc() != null ? ioEncodable.getEnc() : context.runtime.getDefaultExternalEncoding()).isAsciiCompatible()) {
+            throw argumentError(context, "ASCII incompatible encoding needs binmode");
         }
 
         if ((fmode & OpenFile.BINMODE) != 0 && (ecflags & EConvFlags.NEWLINE_DECORATOR_MASK) != 0) {
-            throw runtime.newArgumentError("newline decorator with binary mode");
+            throw argumentError(context, "newline decorator with binary mode");
         }
 
         if ((fmode & OpenFile.BINMODE) == 0 && (EncodingUtils.DEFAULT_TEXTMODE != 0 || (ecflags & EConvFlags.NEWLINE_DECORATOR_MASK) != 0)) {
@@ -1796,35 +1849,29 @@ public class EncodingUtils {
 
     // rb_enc_set_default_external
     public static void rbEncSetDefaultExternal(ThreadContext context, IRubyObject encoding) {
-        if (encoding.isNil()) {
-            throw context.runtime.newArgumentError("default external can not be nil");
-        }
+        if (encoding.isNil()) throw argumentError(context, "default external can not be nil");
 
-        Encoding[] enc_p = {context.runtime.getDefaultExternalEncoding()};
-        encSetDefaultEncoding(context, enc_p, encoding, "external");
-        context.runtime.setDefaultExternalEncoding(enc_p[0]);
+        encSetDefaultEncoding(context, context.runtime.getDefaultExternalEncoding(), encoding, "external", (ctx, enc) -> ctx.runtime.setDefaultExternalEncoding(enc));
     }
 
     // rb_enc_set_default_internal
     public static void rbEncSetDefaultInternal(ThreadContext context, IRubyObject encoding) {
-        Encoding[] enc_p = {context.runtime.getDefaultInternalEncoding()};
-        encSetDefaultEncoding(context, enc_p, encoding, "internal");
-        context.runtime.setDefaultInternalEncoding(enc_p[0]);
+        encSetDefaultEncoding(context, context.runtime.getDefaultInternalEncoding(), encoding, "internal", (ctx, enc) -> ctx.runtime.setDefaultInternalEncoding(enc));
     }
 
     // enc_set_default_encoding
-    public static boolean encSetDefaultEncoding(ThreadContext context, Encoding[] def_p, IRubyObject encoding, String name) {
+    static boolean encSetDefaultEncoding(ThreadContext context, Encoding defaultEncoding, IRubyObject encoding, String name, BiConsumer<ThreadContext, Encoding> setter) {
         boolean overridden = false;
 
-        if (def_p != null) {
+        if (defaultEncoding != null) {
             overridden = true;
         }
 
         if (encoding.isNil()) {
-            def_p[0] = null;
+            setter.accept(context, null);
             // don't set back into encoding table since it defers to us
         } else {
-            def_p[0] = rbToEncoding(context, encoding);
+            setter.accept(context, rbToEncoding(context, encoding));
             // don't set back into encoding table since it defers to us
         }
 
@@ -1997,7 +2044,6 @@ public class EncodingUtils {
 
     // econv_args
     public static void econvArgs(ThreadContext context, IRubyObject[] args, byte[][] encNames, Encoding[] encs, int[] ecflags_p, IRubyObject[] ecopts_p) {
-        Ruby runtime = context.runtime;
         IRubyObject snamev = context.nil;
         IRubyObject dnamev = context.nil;
         IRubyObject flags = context.nil;
@@ -2015,17 +2061,16 @@ public class EncodingUtils {
             }
 
             IRubyObject tmp;
-            if (!(tmp = TypeConverter.checkHashType(runtime, flags)).isNil()) {
+            if (!(tmp = TypeConverter.checkHashType(context.runtime, flags)).isNil()) {
                 opt = tmp;
                 flags = context.nil;
             }
         }
 
         if (!flags.isNil()) {
-            if (!opt.isNil()) {
-                throw runtime.newArgumentError(args.length, 3);
-            }
-            ecflags_p[0] = (int)flags.convertToInteger().getLongValue();
+            if (!opt.isNil()) throw argumentError(context, args.length, 3);
+
+            ecflags_p[0] = toInt(context, flags);
             ecopts_p[0] = context.nil;
         } else if (!opt.isNil()) {
             ecflags_p[0] = EncodingUtils.econvPrepareOpts(context, opt, ecopts_p);
@@ -2034,25 +2079,20 @@ public class EncodingUtils {
             ecopts_p[0] = context.nil;
         }
 
-        encs[0] = runtime.getEncodingService().getEncodingFromObjectNoError(snamev);
-        if (encs[0] == null) {
-            snamev = snamev.convertToString();
-        }
-        encs[1] = runtime.getEncodingService().getEncodingFromObjectNoError(dnamev);
-        if (encs[1] == null) {
-            dnamev = dnamev.convertToString();
-        }
+        var encodingService = encodingService(context);
+        encs[0] = encodingService.getEncodingFromObjectNoError(snamev);
+        if (encs[0] == null) snamev = snamev.convertToString();
+
+        encs[1] = encodingService.getEncodingFromObjectNoError(dnamev);
+        if (encs[1] == null) dnamev = dnamev.convertToString();
 
         encNames[0] = encs[0] != null ? encs[0].getName() : ((RubyString)snamev).getBytes();
         encNames[1] = encs[1] != null ? encs[1].getName() : ((RubyString)dnamev).getBytes();
-
-        return;
     }
 
     // rb_econv_init_by_convpath
-    public static EConv econvInitByConvpath(ThreadContext context, IRubyObject convpath, byte[][] encNames, Encoding[] encs) {
-        final Ruby runtime = context.runtime;
-        final EConv ec = TranscoderDB.alloc(convpath.convertToArray().size());
+    public static EConv econvInitByConvpath(ThreadContext context, IRubyObject convpathArg, byte[][] encNames, Encoding[] encs) {
+        final EConv ec = TranscoderDB.alloc(convpathArg.convertToArray().size());
 
         IRubyObject[] sname_v = {context.nil};
         IRubyObject[] dname_v = {context.nil};
@@ -2063,12 +2103,14 @@ public class EncodingUtils {
 
         boolean first = true;
 
-        for (int i = 0; i < ((RubyArray)convpath).size(); i++) {
-            IRubyObject elt = ((RubyArray)convpath).eltOk(i);
+        var convpath = (RubyArray) convpathArg;
+
+        for (int i = 0; i < convpath.size(); i++) {
+            IRubyObject elt = convpath.eltOk(i);
             IRubyObject pair;
             if (!(pair = elt.checkArrayType()).isNil()) {
                 if (((RubyArray)pair).size() != 2) {
-                    throw context.runtime.newArgumentError("not a 2-element array in convpath");
+                    throw argumentError(context, "not a 2-element array in convpath");
                 }
                 sname_v[0] = ((RubyArray)pair).eltOk(0);
                 encArg(context, sname_v[0], sname, senc);
@@ -2081,7 +2123,7 @@ public class EncodingUtils {
             if (DECORATOR_P(sname[0], dname[0])) {
                 boolean ret = ec.addConverter(sname[0], dname[0], ec.numTranscoders);
                 if (!ret) {
-                    throw runtime.newArgumentError("decoration failed: " + new String(dname[0]));
+                    throw argumentError(context, "decoration failed: " + new String(dname[0]));
                 }
             } else {
                 int j = ec.numTranscoders;
@@ -2095,7 +2137,7 @@ public class EncodingUtils {
                     }
                 });
                 if (ret == -1 || arg[1] == -1) {
-                    throw runtime.newArgumentError("adding conversion failed: " + new String(sname[0]) + " to " + new String(dname[0]));
+                    throw argumentError(context, "adding conversion failed: " + new String(sname[0]) + " to " + new String(dname[0]));
                 }
                 if (first) {
                     first = false;
@@ -2122,22 +2164,20 @@ public class EncodingUtils {
 
     // decorate_convpath
     public static int decorateConvpath(ThreadContext context, IRubyObject convpath, int ecflags) {
-        Ruby runtime = context.runtime;
         int num_decorators;
         byte[][] decorators = new byte[EConvFlags.MAX_ECFLAGS_DECORATORS][];
-        int i;
-        int n, len;
+        int n;
 
         num_decorators = TranscoderDB.decoratorNames(ecflags, decorators);
-        if (num_decorators == -1)
-            return -1;
+        if (num_decorators == -1) return -1;
 
-        len = n = ((RubyArray)convpath).size();
+        int len = n = ((RubyArray)convpath).size();
         if (n != 0) {
             IRubyObject pair = ((RubyArray)convpath).eltOk(n - 1);
-            if (pair instanceof RubyArray) {
-                byte[] sname = runtime.getEncodingService().getEncodingFromObject(((RubyArray)pair).eltOk(0)).getName();
-                byte[] dname = runtime.getEncodingService().getEncodingFromObject(((RubyArray)pair).eltOk(1)).getName();
+            if (pair instanceof RubyArray ary) {
+                var encodingService = encodingService(context);
+                byte[] sname = encodingService.getEncodingFromObject(ary.eltOk(0)).getName();
+                byte[] dname = encodingService.getEncodingFromObject(ary.eltOk(1)).getName();
                 TranscoderDB.Entry entry = TranscoderDB.getEntry(sname, dname);
                 Transcoder tr = entry.getTranscoder();
                 if (tr == null)
@@ -2152,31 +2192,32 @@ public class EncodingUtils {
             }
         }
 
-        for (i = 0; i < num_decorators; i++)
-            ((RubyArray)convpath).store(n + i, newString(runtime, decorators[i]));
+        for (int i = 0; i < num_decorators; i++)
+            ((RubyArray)convpath).store(n + i, newString(context, decorators[i]));
 
         return 0;
     }
 
     // io_enc_str
-    public static IRubyObject ioEncStr(Ruby runtime, IRubyObject str, OpenFile fptr) {
-        ((RubyString)str).setEncoding(fptr.readEncoding(runtime));
+    public static RubyString ioEncStr(Ruby runtime, RubyString str, OpenFile fptr) {
+        str.setEncoding(fptr.readEncoding(runtime));
         return str;
+    }
+
+    public static IRubyObject ioEncStr(Ruby runtime, IRubyObject str, OpenFile fptr) {
+        return ioEncStr(runtime, (RubyString) str, fptr);
     }
 
     // rb_enc_uint_chr
     public static RubyString encUintChr(ThreadContext context, int code, Encoding enc) {
-        Ruby runtime = context.runtime;
-
         long i = code & 0xFFFFFFFFL;
+        int n = EncodingUtils.encCodelen(context, code, enc);
 
-        int n;
-        switch (n = EncodingUtils.encCodelen(context, code, enc)) {
+        switch (n) {
             case ErrorCodes.ERR_INVALID_CODE_POINT_VALUE:
-                throw runtime.newRangeError("invalid codepoint 0x" + Long.toHexString(i) + " in " + enc);
-            case ErrorCodes.ERR_TOO_BIG_WIDE_CHAR_VALUE:
-            case 0:
-                throw runtime.newRangeError(i + " out of char range");
+                throw rangeError(context, "invalid codepoint 0x" + Long.toHexString(i) + " in " + enc);
+            case ErrorCodes.ERR_TOO_BIG_WIDE_CHAR_VALUE, 0:
+                throw rangeError(context, i + " out of char range");
         }
 
         ByteList strBytes = new ByteList(n);
@@ -2188,10 +2229,10 @@ public class EncodingUtils {
 
         encMbcput(context, code, bytes, begin, enc);
         if (StringSupport.preciseLength(enc, bytes, begin, end) != n) {
-            throw runtime.newRangeError("invalid codepoint " + Long.toHexString(i) + " in " + enc);
+            throw rangeError(context, "invalid codepoint 0x" + Long.toHexString(i) + " in " + enc);
         }
 
-        return newString(runtime, strBytes);
+        return newString(context, strBytes);
 
     }
 
@@ -2217,9 +2258,9 @@ public class EncodingUtils {
         if (len < 0) {
             switch (len) {
                 case ErrorCodes.ERR_INVALID_CODE_POINT_VALUE:
-                    throw context.runtime.newRangeError("invalid codepoint " + Long.toHexString(c & 0xFFFFFFFFL) + " in " + enc);
+                    throw rangeError(context, "invalid codepoint 0x" + Long.toHexString(c & 0xFFFFFFFFL) + " in " + enc);
                 case ErrorCodes.ERR_TOO_BIG_WIDE_CHAR_VALUE:
-                    throw context.runtime.newRangeError("" + (c & 0xFFFFFFFFL) + " out of char range");
+                    throw rangeError(context, "" + (c & 0xFFFFFFFFL) + " out of char range");
             }
             throw context.runtime.newEncodingError(EncodingError.fromCode(len).getMessage());
         }
@@ -2240,11 +2281,16 @@ public class EncodingUtils {
         return StringSupport.codePoint(enc, pBytes, p, e);
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static int encCodepointLength(Ruby runtime, byte[] pBytes, int p, int e, int[] len_p, Encoding enc) {
+        return encCodepointLength(runtime.getCurrentContext(), pBytes, p, e, len_p, enc);
+    }
+
+    public static int encCodepointLength(ThreadContext context, byte[] pBytes, int p, int e, int[] len_p, Encoding enc) {
         try {
             return encCodepointLength(pBytes, p, e, len_p, enc);
         } catch (IllegalArgumentException ex) {
-            throw runtime.newArgumentError(ex.getMessage());
+            throw argumentError(context, ex.getMessage());
         }
     }
 
@@ -2254,7 +2300,7 @@ public class EncodingUtils {
         RubyString str = _str.convertToString();
         cr = str.scanForCodeRange();
         if (cr == StringSupport.CR_BROKEN) {
-            throw context.runtime.newArgumentError("replacement must be valid byte sequence '" + str + "'");
+            throw argumentError(context, "replacement must be valid byte sequence '" + str + "'");
         }
         else {
             Encoding e = STR_ENC_GET(str);
@@ -2312,6 +2358,7 @@ public class EncodingUtils {
         return getEncoding(str.getByteList());
     }
 
+    @Deprecated(since = "10.0.0.0")
     public static RubyString rbStrEscape(Ruby runtime, RubyString str) {
         return (RubyString) RubyString.rbStrEscape(runtime.getCurrentContext(), str);
     }
@@ -2375,36 +2422,54 @@ public class EncodingUtils {
     public static int encCodelen(ThreadContext context, int c, Encoding enc) {
         int n = enc.codeToMbcLength(c);
         if (n == 0) {
-            throw context.runtime.newArgumentError("invalid codepoint 0x" + Long.toHexString(c & 0xFFFFFFFFL) + " in " + enc);
+            throw argumentError(context, "invalid codepoint 0x" + Long.toHexString(c & 0xFFFFFFFFL) + " in " + enc);
         }
         return n;
     }
 
-    @Deprecated
+    // MRI: rb_ascii8bit_appendable_encoding_index
+    public static Encoding rbAscii8bitAppendableEncodingIndex(ThreadContext context, Encoding enc, int code) {
+        if (enc == ASCIIEncoding.INSTANCE || enc == USASCIIEncoding.INSTANCE) {
+            /* US-ASCII automatically extended to ASCII-8BIT */
+            if (code > 0xFF) {
+                throw rangeError(context, code + " out of char range");
+            }
+            if (enc == USASCIIEncoding.INSTANCE && code > 127) {
+                return ASCIIEncoding.INSTANCE;
+            }
+            return enc;
+        } else {
+            return null;
+        }
+    }
+
+    @Deprecated(since = "9.2.0.0")
     public static Encoding ioStripBOM(RubyIO io) {
         return ioStripBOM(io.getRuntime().getCurrentContext(), io);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public static Encoding strTranscode0(ThreadContext context, int argc, IRubyObject[] args, IRubyObject[] self_p, int ecflags, IRubyObject ecopts) {
         Encoding[] enc_p = {null};
         TranscodeResult result = (ctx, str, enc, newStr) -> {enc_p[0] = enc; self_p[0] = newStr; return newStr;};
-        switch (argc) {
-            case 0:
+        return switch (argc) {
+            case 0 -> {
                 strTranscode0(context, (RubyString) self_p[0], ecflags, ecopts, result);
-                return enc_p[0];
-            case 1:
+                yield enc_p[0];
+            }
+            case 1 -> {
                 strTranscode1(context, args[0], (RubyString) self_p[0], ecflags, ecopts, result);
-                return enc_p[0];
-            case 2:
+                yield enc_p[0];
+            }
+            case 2 -> {
                 strTranscode2(context, args[0], args[1], (RubyString) self_p[0], ecflags, ecopts, result);
-                return enc_p[0];
-            default:
-                throw context.runtime.newArgumentError(args.length, 2);
-        }
+                yield enc_p[0];
+            }
+            default -> throw argumentError(context, args.length, 2);
+        };
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public static Encoding strTranscode(ThreadContext context, IRubyObject[] args, IRubyObject[] self_p) {
         Encoding[] enc_p = {null};
         TranscodeResult result = (ctx, str, enc, newStr) -> {enc_p[0] = enc; self_p[0] = newStr; return newStr;};
@@ -2414,35 +2479,30 @@ public class EncodingUtils {
         return enc_p[0];
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public static IRubyObject strEncode(ThreadContext context, IRubyObject str, IRubyObject... args) {
         return strTranscode(context, args, (RubyString) str, EncodingUtils::encodedDup);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public static IRubyObject encodedDup(ThreadContext context, IRubyObject newstr, IRubyObject str, Encoding encindex) {
         return encodedDup(context, (RubyString) newstr, encindex, (RubyString) str);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public static IRubyObject strEncodeAssociate(ThreadContext context, IRubyObject str, Encoding encidx) {
         return strEncodeAssociate((RubyString) str, encidx);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.4.6.0")
     public static IRubyObject strTranscode(ThreadContext context, IRubyObject[] args, RubyString str, TranscodeResult result) {
-        switch (args.length) {
-            case 0:
-                return strTranscode(context, str, result);
-            case 1:
-                return strTranscode(context, args[0], str, result);
-            case 2:
-                return strTranscode(context, args[0], args[1], str, result);
-            case 3:
-                return strTranscode(context, args[0], args[1], args[2], str, result);
-            default:
-                throw context.runtime.newArgumentError(args.length, 2);
-        }
+        return switch (args.length) {
+            case 0 -> strTranscode(context, str, result);
+            case 1 -> strTranscode(context, args[0], str, result);
+            case 2 -> strTranscode(context, args[0], args[1], str, result);
+            case 3 -> strTranscode(context, args[0], args[1], args[2], str, result);
+            default -> throw argumentError(context, args.length, 2);
+        };
     }
 
 }

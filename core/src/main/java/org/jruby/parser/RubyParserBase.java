@@ -58,8 +58,8 @@ import org.jruby.ast.types.INameNode;
 import org.jruby.ast.visitor.OperatorCallNode;
 import org.jruby.common.IRubyWarnings;
 import org.jruby.common.IRubyWarnings.ID;
-import org.jruby.common.RubyWarnings;
 import org.jruby.ext.coverage.CoverageData;
+import org.jruby.ir.builder.StringStyle;
 import org.jruby.lexer.LexerSource;
 import org.jruby.lexer.yacc.LexContext;
 import org.jruby.lexer.yacc.RubyLexer;
@@ -75,6 +75,7 @@ import org.jruby.util.RegexpOptions;
 import org.jruby.util.StringSupport;
 import org.jruby.util.cli.Options;
 
+import static org.jruby.ir.builder.StringStyle.*;
 import static org.jruby.lexer.LexingCommon.*;
 import static org.jruby.lexer.LexingCommon.AMPERSAND_AMPERSAND;
 import static org.jruby.lexer.LexingCommon.DOT;
@@ -85,9 +86,6 @@ import static org.jruby.parser.RubyParserBase.IDType.*;
 import static org.jruby.util.CommonByteLists.*;
 import static org.jruby.util.RubyStringBuilder.*;
 
-/** 
- *
- */
 public abstract class RubyParserBase {
     // Parser states:
     protected StaticScope currentScope;
@@ -111,6 +109,7 @@ public abstract class RubyParserBase {
     private Node numParamCurrent = null;
     private Node numParamInner = null;
     private Node numParamOuter = null;
+    protected static final int ORDINAL_PARAM = -1;
 
     private Ruby runtime;
 
@@ -122,7 +121,11 @@ public abstract class RubyParserBase {
 
     private static final int[] EMPTY_COVERAGE = new int[0];
 
-    private boolean frozenStringLiterals;
+    private StringStyle stringStyle = Chilled;
+
+    private Node itId;
+
+    private TokenInfo tokenInfo;
 
     public RubyParserBase(Ruby runtime, LexerSource source, DynamicScope scope, ParserType type) {
         this.runtime = runtime;
@@ -130,7 +133,7 @@ public abstract class RubyParserBase {
         this.existingScope = scope;
         this.type = type;
         this.result = new RubyParserResult();
-        frozenStringLiterals = runtime.getInstanceConfig().isFrozenStringLiteral();
+        setStringStyle(runtime.getInstanceConfig().isFrozenStringLiteral());
     }
 
     public void reset() {
@@ -196,18 +199,14 @@ public abstract class RubyParserBase {
 
     }
 
-    public ArgsNode args_with_numbered(ArgsNode args, int paramCount) {
+    public ArgsNode args_with_numbered(ArgsNode args, int paramCount, Node itNode) {
         if (paramCount > 0) {
-            if (args == null) { // FIXME: I think this is not possible.
-                ListNode pre = makePreNumArgs(paramCount);
-                args = new_args(lexer.getRubySourceline(), pre, null, null, null, null);
-            } else if (args.getArgs().length == 0) {
-                ListNode pre = makePreNumArgs(paramCount);
-                args = new_args(lexer.getRubySourceline(), pre, null, null, null, null);
-            } else {
-                // FIXME: not sure where errors are printed in all this but could be here.
-            }
-            // FIXME: it just sets pre-value here but what existing args node would work here?
+            ListNode pre = makePreNumArgs(paramCount);
+            args = new_args(lexer.getRubySourceline(), pre, null, null, null, null);
+        } else if (itNode != null) {
+            DVarNode dvar = (DVarNode) itNode;
+            Node arg = new ArgumentNode(dvar.getLine(), dvar.getName(), dvar.getDepth());
+            args = new_args(lexer.getRubySourceline(), newArrayNode(arg.getLine(), arg), null, null, null, null);
         }
         return args;
     }
@@ -269,9 +268,6 @@ public abstract class RubyParserBase {
 
             if (currentScope.isBlockScope() && slot != -1) {
                 if (isNumParamId(id) && isNumParamNested()) return null;
-                if (name.getBytes().equals(lexer.getCurrentArg())) {
-                    compile_error(str(getRuntime(), "circular argument reference - ", name));
-                }
 
                 Node newNode = new DVarNode(node.getLine(), slot, name);
 
@@ -283,9 +279,6 @@ public abstract class RubyParserBase {
 
             StaticScope.Type type = currentScope.getType();
             if (type == StaticScope.Type.LOCAL) {
-                if (name.getBytes().equals(lexer.getCurrentArg())) {
-                    compile_error(str(getRuntime(), "circular argument reference - ", name));
-                }
 
                 Node newNode = new LocalVarNode(node.getLine(), slot, name);
 
@@ -320,6 +313,10 @@ public abstract class RubyParserBase {
         return null;
     }
 
+    public boolean hasNumParam() {
+        return maxNumParam > 0;
+    }
+
     private boolean numberedParam(String id) {
         int n = Integer.parseInt(id.substring(1));
         if (scopedParserState.getEnclosingScope() == null) return false;
@@ -348,6 +345,15 @@ public abstract class RubyParserBase {
         return true;
     }
 
+    private boolean isItUsed() {
+        if (it_id() != null) {
+            compile_error("'it' is already used in\n" + lexer.getFile() + ":" + it_id().getLine() + ": " +
+                    (numParamOuter != null ? "outer" : "inner") + " block here");
+            // FIXME: Show error line
+        }
+        return false;
+    }
+
     private boolean isNumParamId(String id) {
         if (id.length() != 2 || id.charAt(0) != '_') return false;
 
@@ -367,9 +373,6 @@ public abstract class RubyParserBase {
 
     public Node declareIdentifier(ByteList byteName) {
         RubySymbol name = symbolID(byteName);
-        if (byteName.equals(lexer.getCurrentArg())) {
-            compile_error(str(getRuntime(), "circular argument reference - ", name));
-        }
 
         String id = name.idString();
         boolean isNumParam = isNumParamId(id);
@@ -389,6 +392,23 @@ public abstract class RubyParserBase {
                     new DVarNode(lexer.tokline, slot, name) :
                     new LocalVarNode(lexer.tokline, slot, name);
             if (numParamCurrent == null) numParamCurrent = node;
+        } else if ("**".equals(id)) {
+            slot = currentScope.addVariable(id);
+            node = new LocalVarNode(lexer.tokline, slot, name);
+        } else if (dyna_in_block() && id.equals("it")) {
+            if (!hasArguments()) {
+                int existing = currentScope.isDefined(id);
+                slot = existing == -1 ?
+                        currentScope.addVariable(id) : existing;
+                node = new DVarNode(lexer.tokline, slot, name);
+                if (existing == -1) set_it_id(node);
+            } else {
+                slot = currentScope.isDefined(id);
+                // A special it cannot exist without being marked as a special it.
+                if (it_id() == null && slot == -1) compile_error("`it` is not allowed when an ordinary parameter is defined");
+
+                node = currentScope.declare(lexer.tokline, name);
+            }
         }  else {
             node = currentScope.declare(lexer.tokline, name);
             slot = currentScope.isDefined(id); // FIXME: we should not do this extra call.
@@ -482,13 +502,6 @@ public abstract class RubyParserBase {
         if (tail == null) return head;
         if (head == null) return tail;
 
-        switch (head.getNodeType()) {
-            case BIGNUMNODE: case FIXNUMNODE: case FLOATNODE: // NODE_LIT
-            case STRNODE: case SELFNODE: case TRUENODE: case FALSENODE: case NILNODE:
-                if (!(head instanceof InvisibleNode)) warning(ID.MISCELLANEOUS, lexer.getFile(), tail.getLine(), "unused literal ignored");
-                return tail;
-        }
-
         if (!(head instanceof BlockNode)) {
             head = new BlockNode(head.getLine()).add(head);
         }
@@ -560,6 +573,39 @@ public abstract class RubyParserBase {
         return call_bin_op(firstNode, CommonByteLists.EQUAL_TILDE, secondNode);
     }
 
+    private void aryset_check(Node args) {
+        Node block = null;
+        boolean keywords = false;
+        if (args instanceof BlockPassNode bp) {
+            block = bp.getBodyNode();
+            args = bp.getArgsNode();
+        }
+
+        if (args != null && args instanceof ArgsCatNode ac) {
+            args = ac.getSecondNode();
+        }
+
+        if (args != null && args instanceof ArgsPushNode ap) {
+            keywords = ap.getSecondNode() instanceof KeywordArgNode || ap.getSecondNode() instanceof KeywordRestArgNode;
+        } else {
+            if (args instanceof ListNode list) {
+                for (int i = 0; i < list.size(); i++) {
+                    Node next = list.get(i);
+                    if (next instanceof HashNode hash && !hash.isLiteral()) {
+                        keywords = true;
+                    }
+                }
+            }
+        }
+
+        if (keywords) {
+            yyerror("keyword arg given in index");
+        }
+        if (block != null) {
+            yyerror("block arg given in index assignment");
+        }
+    }
+
     /**
      * Define an array set condition so we can return lhs
      * 
@@ -569,6 +615,7 @@ public abstract class RubyParserBase {
      */
     public Node aryset(Node receiver, Node index) {
         value_expr(receiver);
+        aryset_check(index);
 
         return new_attrassign(receiver.getLine(), receiver, CommonByteLists.ASET_METHOD, index, false);
     }
@@ -588,14 +635,10 @@ public abstract class RubyParserBase {
         return new_attrassign(receiver.getLine(), receiver, name.append('='), null, isLazy(callType));
     }
 
-    public void backrefAssignError(Node node) {
-        if (node instanceof NthRefNode) {
-            String varName = "$" + ((NthRefNode) node).getMatchNumber();
-            lexer.compile_error("Can't set variable " + varName + '.');
-        } else if (node instanceof BackRefNode) {
-            String varName = "$" + ((BackRefNode) node).getType();
-            lexer.compile_error("Can't set variable " + varName + '.');
-        }
+    public void backref_error(Node node) {
+        String varName = "$" + (node instanceof NthRefNode ?
+                ((NthRefNode) node).getMatchNumber() : ""+((BackRefNode) node).getType());
+        lexer.compile_error("Can't set variable " + varName + '.');
     }
 
     private static Node arg_add(int line, Node node1, Node node2) {
@@ -610,10 +653,11 @@ public abstract class RubyParserBase {
         
         return new ArgsPushNode(line, node1, node2);
     }
-    
+
+    // FIXME: lexcontext for shareable constants support but not impld
 	/**
 	 **/
-    public static Node node_assign(Node lhs, Node rhs) {
+    public static Node node_assign(Node lhs, Node rhs, LexContext _lexContext) {
         if (lhs == null) return null;
 
         // MRI sets position to one passed in its version of node_assign but it is always pos of lhs????
@@ -821,7 +865,7 @@ public abstract class RubyParserBase {
                 int slot = currentScope.isDefined(id2);
 
                 if (currentScope.isBlockScope() && slot != -1) {
-                    if (isNumParamId(id2) && isNumParamNested()) return null;
+                    if (isNumParamId(id2) && (isNumParamNested() || isItUsed())) return null;
                     if (name.getBytes().equals(lexer.getCurrentArg())) {
                         compile_error(str(getRuntime(), "circular argument reference - ", name));
                     }
@@ -848,12 +892,22 @@ public abstract class RubyParserBase {
 
                     return newNode;
                 }
-                if (type == StaticScope.Type.BLOCK && isNumParamId(id2) && numberedParam(id2)) {
-                    if (isNumParamNested()) return null;
+                if (dyna_in_block() && isNumParamId(id2) && numberedParam(id2)) {
+                    if (isNumParamNested() || isItUsed()) return null;
 
                     Node newNode = new DVarNode(loc, slot, name);
                     if (numParamCurrent == null) numParamCurrent = newNode;
                     return newNode;
+                }
+                if (dyna_in_block() && id.equals("it") && !hasArguments()) {
+                    if (hasNumParam()) return null;
+                    if (maxNumParam == ORDINAL_PARAM) {
+                        compile_error("ordinary parameter is defined");
+                        return null;
+                    }
+                    if (it_id() == null) {
+                        throw new RuntimeException("Need to register in lvtbl+make anon lvar(or maybe it although perhaps they do not capture)");
+                    }
                 }
                 if (currentScope.getType() != StaticScope.Type.BLOCK) numparam_name(id);
 
@@ -896,7 +950,7 @@ public abstract class RubyParserBase {
         if (node instanceof MultipleAsgnNode || node instanceof LocalAsgnNode || node instanceof DAsgnNode || node instanceof GlobalAsgnNode || node instanceof InstAsgnNode) {
             Node valueNode = ((AssignableNode) node).getValueNode();
             if (isStaticContent(valueNode)) {
-                warning(ID.ASSIGNMENT_IN_CONDITIONAL, lexer.getFile(), valueNode.getLine(), "found `= literal' in conditional, should be ==");
+                warning(ID.ASSIGNMENT_IN_CONDITIONAL, lexer.getFile(), valueNode.getLine(), "found '= literal' in conditional, should be ==");
             }
             return true;
         } 
@@ -1180,7 +1234,7 @@ public abstract class RubyParserBase {
         return new WhenNode(line, expressionNodes, bodyNode, nextCase);
     }
 
-    public Node new_op_assign(AssignableNode receiverNode, ByteList operatorName, Node valueNode) {
+    public Node new_op_assign(AssignableNode receiverNode, ByteList operatorName, Node valueNode, LexContext _lexContext) {
         int line = receiverNode.getLine();
 
         if (operatorName == OR_KEYWORD || operatorName == OR_OR) {
@@ -1196,8 +1250,10 @@ public abstract class RubyParserBase {
         }
     }
 
-    public Node new_ary_op_assign(Node receiverNode, ByteList operatorName, Node argsNode, Node valueNode) {
+    public Node new_ary_op_assign(Node receiverNode, Node argsNode, ByteList operatorName, Node valueNode) {
         int line = lexer.tokline;
+
+        aryset_check(argsNode);
 
         // We extract BlockPass from tree and insert it as a block node value (MRI wraps it around the args)
         Node blockNode = null;
@@ -1212,11 +1268,11 @@ public abstract class RubyParserBase {
         return newNode;
     }
 
-    public Node new_attr_op_assign(Node receiverNode, ByteList callType, Node valueNode, ByteList variableName, ByteList operatorName) {
+    public Node new_attr_op_assign(Node receiverNode, ByteList callType, ByteList variableName, ByteList operatorName, Node valueNode) {
         return new OpAsgnNode(receiverNode.getLine(), receiverNode, valueNode, symbolID(variableName), symbolID(operatorName), isLazy(callType));
     }
 
-    public Node new_const_op_assign(int line, Node lhs, ByteList operatorName, Node rhs) {
+    public Node new_const_op_assign(int line, Node lhs, ByteList operatorName, Node rhs, LexContext _lexContext) {
         // FIXME: Maybe need to fixup position?
         if (lhs != null) {
             return new OpAsgnConstDeclNode(line, lhs, symbolID(operatorName), rhs);
@@ -1251,7 +1307,7 @@ public abstract class RubyParserBase {
         // FIXME: We walk this during identifier construction so we should calculate CR without having to walk twice.
         if (RubyString.scanForCodeRange(identifierValue) == StringSupport.CR_BROKEN) {
             Ruby runtime = getRuntime();
-            throw runtime.newSyntaxError(str(runtime, "invalid symbol in encoding " + lexer.getEncoding() + " :\"", inspectIdentifierByteList(runtime, identifierValue), "\""));
+            throw runtime.newSyntaxError(str(runtime, "invalid symbol in encoding " + lexer.getEncoding() + " :\"", inspectIdentifierByteList(runtime, identifierValue), "\""), getFile());
         }
 
         return RubySymbol.newIDSymbol(getRuntime(), identifierValue);
@@ -1344,7 +1400,7 @@ public abstract class RubyParserBase {
         warnOnUnusedVariables = getWarnings().isVerbose() && !isEval() && !isInline();
     }
 
-    boolean isEval() {
+    protected boolean isEval() {
         return type == ParserType.EVAL;
     }
 
@@ -1364,7 +1420,7 @@ public abstract class RubyParserBase {
     }
 
     public KeyValuePair<Node, Node> createKeyValue(Node key, Node value) {
-        if (key instanceof StrNode) ((StrNode) key).setFrozen(true);
+        if (key instanceof StrNode) ((StrNode) key).setStringStyle(Frozen);
 
         return new KeyValuePair<>(key, value);
     }
@@ -1415,6 +1471,7 @@ public abstract class RubyParserBase {
                 DStrNode newDStr = new DStrNode(head.getLine(), ((DStrNode) tail).getEncoding());
                 newDStr.add(head);
                 newDStr.addAll(tail);
+                newDStr.setStringStyle(stringStyle);
                 return newDStr;
             } 
 
@@ -1568,7 +1625,7 @@ public abstract class RubyParserBase {
             if (encounteredKeys.containsKey(key)) {
                 Ruby runtime = getRuntime();
                 IRubyObject value = ((LiteralValue) key).literalValue(runtime);
-                warning(ID.AMBIGUOUS_ARGUMENT, lexer.getFile(), hash.getLine(), str(runtime, "key ", value.inspect(),
+                warning(ID.AMBIGUOUS_ARGUMENT, lexer.getFile(), hash.getLine(), str(runtime, "key ", value.inspect(runtime.getCurrentContext()),
                         " is duplicated and overwritten on line " + (key.getLine() + 1)));
             }
             // even if the key was previously seen, we replace the value to properly remove multiple duplicates
@@ -1636,7 +1693,7 @@ public abstract class RubyParserBase {
         return RubyLexer.isIdentifierChar(name.charAt(0));
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.0.0")
     public boolean is_local_id(String name) {
         return RubyLexer.isIdentifierChar(name.charAt(0));
     }
@@ -1685,7 +1742,7 @@ public abstract class RubyParserBase {
     }
 
     public enum IDType {
-        Local, Global, Instance, AttrSet, Constant, Class;
+        Local, Global, Instance, AttrSet, Constant, Class, Error;
     }
 
     public static IDType id_type(ByteList identifier) {
@@ -1700,10 +1757,16 @@ public abstract class RubyParserBase {
                 return Global;
         }
 
-        byte last = (byte) identifier.get(identifier.length() - 1);
+        int length = identifier.length();
+        byte last = (byte) identifier.get(length - 1);
         if (last == '=') {
+            if (length > 1 && identifier.charAt(length - 2) == '=') {
+                return Local;
+            }
             return AttrSet;
         }
+
+        if (last == '!' || last == '?') return Error;
 
         return Local;
     }
@@ -1811,7 +1874,8 @@ public abstract class RubyParserBase {
     public void compile_error(String message) { // mri: rb_compile_error_with_enc
         String line = lexer.getCurrentLine();
         int pos = lexer.getRubySourceline();
-        String errorMessage = lexer.getFile() + ":" + (pos + 1) + ": ";
+        String file = lexer.getFile();
+        String errorMessage = file + ":" + (pos + 1) + ": ";
 
         if (line != null && line.length() > 5) {
             boolean addNewline = message != null && ! message.endsWith("\n");
@@ -1819,7 +1883,7 @@ public abstract class RubyParserBase {
             message += (addNewline ? "\n" : "") + line;
         }
 
-        throw getRuntime().newSyntaxError(errorMessage + message);
+        throw getRuntime().newSyntaxError(errorMessage + message, lexer.getFile());
     }
 
     public Node new_regexp(int line, Node contents, RegexpNode end) {
@@ -1914,9 +1978,23 @@ public abstract class RubyParserBase {
 
     public static final ByteList INTERNAL_ID = new ByteList(new byte[] {}, USASCIIEncoding.INSTANCE);
 
-    @Deprecated
+    @Deprecated(since = "9.2.0.0")
     public String internalId() {
         return INTERNAL_ID.toString();
+    }
+
+    protected void begin_definition(String name) {
+        LexContext ctxt = getLexContext();
+        ctxt.in_class = name != null;
+        if (!ctxt.in_class) {
+            ctxt.cant_return = !ctxt.in_def;
+            ctxt.in_def = false;
+        } else if (ctxt.in_def) {
+            yyerror((name != null ? (name + " ") : "") + "definition in method body");
+        } else {
+            ctxt.cant_return = true;
+        }
+        pushLocalScope();
     }
 
     public Set<ByteList> push_pvtbl() {
@@ -1947,8 +2025,15 @@ public abstract class RubyParserBase {
         return new InNode(line, expression, body, nextCase);
     }
 
-    public void endless_method_name(DefHolder name) {
-        // FIXME: IMPL
+    public void endless_method_name(DefHolder name, ProductionState loc) {
+        if (is_attrset_id(name.name)) {
+            yyerror("setter method cannot be defined in an endless method definition");
+        }
+        token_info_drop(name.name.idString(), loc);
+    }
+
+    private boolean is_attrset_id(RubySymbol name) {
+        return id_type(name.getBytes()) == AttrSet;
     }
 
     public Node reduce_nodes(Node body) {
@@ -2002,10 +2087,6 @@ public abstract class RubyParserBase {
         }
 
         return new HashPatternNode(line, restArg, keywordArgs == null ? new HashNode(line) : keywordArgs);
-    }
-
-    public void warn_experimental(int line, String message) {
-        ((RubyWarnings) getWarnings()).warnExperimental(lexer.getFile(), line, message);
     }
 
     public Node rescued_expr(int line, Node arg, Node rescue) {
@@ -2132,6 +2213,10 @@ public abstract class RubyParserBase {
         return lexer.getLexContext();
     }
 
+    protected void setLexContext(LexContext lexContext) {
+        lexer.setLexContext(lexContext);
+    }
+
     protected int src_line() {
         return lexer.getRubySourceline();
     }
@@ -2228,6 +2313,12 @@ public abstract class RubyParserBase {
         lexer.setHeredocLineIndent(indent);
     }
 
+    protected ConstDeclNode cont_decl(int position, INameNode constNode) {
+        if (getLexContext().in_def) yyerror("dynamic constant assignment");
+
+        return new ConstDeclNode(position, null, constNode, NilImplicitNode.NIL);
+    }
+
     public Ruby getRuntime() {
         return runtime;
     }
@@ -2248,12 +2339,12 @@ public abstract class RubyParserBase {
         return lexer.isEndSeen();
     }
 
-    public boolean isFrozenStringLiteral() {
-        return frozenStringLiterals;
+    public StringStyle getStringStyle() {
+        return stringStyle;
     }
 
-    public void setFrozenStringLiteral(boolean b) {
-        frozenStringLiterals = b;
+    public void setStringStyle(Boolean frozen) {
+        stringStyle = frozen != null ? (frozen ? Frozen : Mutable) : Chilled;
     }
 
     public DynamicScope finalizeDynamicScope(StaticScope staticScope) {
@@ -2281,7 +2372,8 @@ public abstract class RubyParserBase {
     }
 
     public boolean isCoverageEnabled() {
-        return !isEval() && getRuntime().getCoverageData().isCoverageEnabled();
+        Ruby runtime = this.runtime;
+        return runtime.isCoverageEnabled() && !isEval() || runtime.getCoverageData().isEvalCovered();
     }
 
     /**
@@ -2327,4 +2419,80 @@ public abstract class RubyParserBase {
     }
 
     public static final ByteList NOT = BANG;
+
+    protected void token_info_setup(String value, ProductionState loc) {
+
+    }
+
+    protected void token_info_push(String value, ProductionState loc) {
+
+    }
+
+    protected void token_info_pop(String value, ProductionState loc) {
+        //  FIXME: impl
+    }
+    protected void token_info_drop(String value, ProductionState loc) {
+        //  FIXME: impl
+    }
+
+    protected void token_info_warn(String name, int same, ProductionState loc) {
+
+    }
+
+    protected TokenInfo getTokenInfo() {
+        return tokenInfo;
+    }
+
+    protected void push_end_expect_token_locations(int line) {
+        // FIXME: impl
+    }
+
+    protected NodeExits allow_block_exit() {
+        // FIXME: Impl
+        return null;
+    }
+
+    protected void clear_block_exit(boolean value) {
+
+    }
+
+    protected void next_rescue_context(LexContext context, LexContext.InRescue value) {
+
+    }
+
+    protected Node it_id() {
+        return itId;
+    }
+
+    protected void set_it_id(Node node) {
+        this.itId = node;
+    }
+
+    protected NodeExits init_block_exit() {
+        return new NodeExits();
+    }
+
+    protected void restore_block_exit(NodeExits nodeExits) {
+        // FIXME:Impl
+    }
+
+    protected Node NEW_ERROR(ProductionState loc) {
+        return new ErrorNode(loc);
+    }
+
+    protected void forwarding_arg_check(ByteList rest, ByteList all, String var) {
+        // FIXME: Impl
+    }
+
+    protected void WARN_EOL(String name) {
+        // FIXME: IMpl
+    }
+
+    protected boolean dyna_in_block() {
+        return currentScope.isBlockScope() && currentScope.getType() != StaticScope.Type.EVAL;
+    }
+
+    private boolean hasArguments() {
+        return !currentScope.getSignature().isNoArguments();
+    }
 }

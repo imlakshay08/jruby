@@ -35,13 +35,16 @@ import org.jruby.runtime.ClassIndex;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
+import static org.jruby.api.Create.newString;
+import static org.jruby.api.Define.defineClass;
+
 /**
  * Minimal RubyContinuation class to support third-party users.
  */
 @JRubyClass(name="Continuation")
-@Deprecated
+@Deprecated(since = "9.2.6.0")
 public class RubyContinuation extends RubyObject {
-    @Deprecated
+    @Deprecated(since = "9.2.6.0")
     public static class Continuation extends CatchThrow {
         public Continuation() {
             super();
@@ -55,18 +58,14 @@ public class RubyContinuation extends RubyObject {
     private final Continuation continuation;
     private boolean disabled;
     
-    public static RubyClass createContinuation(Ruby runtime) {
-        RubyClass cContinuation = runtime.defineClass("Continuation",runtime.getObject(),runtime.getObject().getAllocator());
-
-        cContinuation.setClassIndex(ClassIndex.CONTINUATION);
-        cContinuation.setReifiedClass(RubyContinuation.class);
-
-        cContinuation.getSingletonClass().undefineMethod("new");
-
-        return cContinuation;
+    public static RubyClass createContinuation(ThreadContext context, RubyClass objectClass) {
+        return defineClass(context, "Continuation", objectClass, objectClass.getAllocator()).
+                reifiedClass(RubyContinuation.class).
+                classIndex(ClassIndex.CONTINUATION).
+                tap(c -> c.singletonClass(context).undefMethods(context, "new"));
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.6.0")
     public RubyContinuation(Ruby runtime) {
         super(runtime, runtime.getContinuation());
         this.continuation = new Continuation();
@@ -78,29 +77,29 @@ public class RubyContinuation extends RubyObject {
      * @param runtime Current JRuby runtime
      * @param tag The tag to use
      */
-    @Deprecated
+    @Deprecated(since = "9.2.6.0")
     public RubyContinuation(Ruby runtime, IRubyObject tag) {
         super(runtime, runtime.getContinuation());
         this.continuation = new Continuation(tag);
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.6.0")
     public Continuation getContinuation() {
         return continuation;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.6.0")
     public IRubyObject call(ThreadContext context, IRubyObject[] args) {
         if (disabled) {
             RubyKernel.raise(context, context.runtime.getThreadError(),
-                    new IRubyObject[]{context.runtime.newString("continuations can not be called from outside their scope")},
+                    new IRubyObject[]{newString(context, "continuations can not be called from outside their scope")},
                     Block.NULL_BLOCK);
         }
         continuation.args = args;
         throw continuation;
     }
 
-    @Deprecated
+    @Deprecated(since = "9.2.6.0")
     public IRubyObject enter(ThreadContext context, IRubyObject yielded, Block block) {
         try {
             return block.yield(context, yielded);

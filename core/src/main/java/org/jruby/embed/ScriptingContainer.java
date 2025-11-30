@@ -68,6 +68,9 @@ import org.jruby.util.SafePropertyAccessor;
 import org.jruby.util.cli.OutputStrings;
 import org.jruby.util.cli.Options;
 
+import static org.jruby.api.Access.globalVariables;
+import static org.jruby.api.Access.objectClass;
+
 /**
  * ScriptingContainer provides various methods and resources that are useful
  * for embedding Ruby in Java. Using this class, users can run Ruby scripts from
@@ -441,8 +444,7 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
 
     /**
      * Returns a compile mode currently chosen, which is one of CompileMode.JIT,
-     * CompileMode.FORCE, CompileMode.OFF. The default mode is CompileMode.OFF
-     * if CompatVersion.RUBY1_9 is chosen, otherwise, CompileMode.JIT. Also,
+     * CompileMode.FORCE, CompileMode.OFF. The default mode is CompileMode.JIT. Also,
      * CompileMode.OFF is chosen when a security restriction is set.
      *
      * @since JRuby 1.5.0.
@@ -722,7 +724,7 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      *
      * @param mode a new profiling mode to be set.
      */
-    @Deprecated
+    @Deprecated(since = "1.7.17")
     public void setProfile(ProfilingMode mode) {
         provider.getRubyInstanceConfig().setProfilingMode(mode);
     }
@@ -1046,7 +1048,7 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      *
      * @return Ruby runtime of a specified local context
      */
-    @Deprecated
+    @Deprecated(since = "1.5.0")
     public Ruby getRuntime() {
         return provider.getRuntime();
     }
@@ -1659,23 +1661,20 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      * @param reader is a reader to be set
      */
     public void setReader(Reader reader) {
-        if (reader == null) {
-            return;
-        }
+        if (reader == null) return;
+
         Map map = getAttributeMap();
         if (map.containsKey(AttributeName.READER)) {
             Reader old = (Reader) map.get(AttributeName.READER);
-            if (old == reader) {
-                return;
-            }
+            if (old == reader) return;
         }
         map.put(AttributeName.READER, reader);
         InputStream istream = new ReaderInputStream(reader);
-        Ruby runtime = provider.getRuntime();
-        RubyIO io = new RubyIO(runtime, istream);
+        var context = provider.getRuntime().getCurrentContext();
+        RubyIO io = new RubyIO(context.runtime, istream);
         io.getOpenFile().setSync(true);
-        runtime.defineVariable(new InputGlobalVariable(runtime, "$stdin", io), GlobalVariable.Scope.GLOBAL);
-        runtime.getObject().storeConstant("STDIN", io);
+        context.runtime.defineVariable(new InputGlobalVariable(context.runtime, "$stdin", io), GlobalVariable.Scope.GLOBAL);
+        objectClass(context).storeConstant(context, "STDIN", io);
     }
 
     /**
@@ -1699,7 +1698,7 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      *
      * @return an input stream that Ruby runtime has.
      */
-    @Deprecated
+    @Deprecated(since = "1.5.0")
     public InputStream getIn() {
         return getInput();
     }
@@ -1726,16 +1725,14 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
     }
 
     private void setOutputStream(PrintStream pstream) {
-        if (pstream == null) {
-            return;
-        }
-        Ruby runtime = provider.getRuntime();
-        RubyIO io = new RubyIO(runtime, pstream);
+        if (pstream == null) return;
+        var context = provider.getRuntime().getCurrentContext();
+        RubyIO io = new RubyIO(context.runtime, pstream);
         io.getOpenFile().setSync(true);
-        runtime.defineVariable(new OutputGlobalVariable(runtime, "$stdout", io), GlobalVariable.Scope.GLOBAL);
-        runtime.getObject().storeConstant("STDOUT", io);
-        runtime.getGlobalVariables().alias("$>", "$stdout");
-        runtime.getGlobalVariables().alias("$defout", "$stdout");
+        context.runtime.defineVariable(new OutputGlobalVariable(context.runtime, "$stdout", io), GlobalVariable.Scope.GLOBAL);
+        objectClass(context).storeConstant(context, "STDOUT", io);
+        globalVariables(context).alias("$>", "$stdout");
+        globalVariables(context).alias("$defout", "$stdout");
     }
 
     public void resetWriter() {
@@ -1764,7 +1761,7 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      *
      * @return an output stream that Ruby runtime has
      */
-    @Deprecated
+    @Deprecated(since = "1.5.0")
     public PrintStream getOut() {
         return getOutput();
     }
@@ -1791,15 +1788,14 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
     }
 
     private void setErrorStream(PrintStream error) {
-        if (error == null) {
-            return;
-        }
-        Ruby runtime = provider.getRuntime();
-        RubyIO io = new RubyIO(runtime, error);
+        if (error == null) return;
+
+        var context = provider.getRuntime().getCurrentContext();
+        RubyIO io = new RubyIO(context.runtime, error);
         io.getOpenFile().setSync(true);
-        runtime.defineVariable(new OutputGlobalVariable(runtime, "$stderr", io), GlobalVariable.Scope.GLOBAL);
-        runtime.getObject().storeConstant("STDERR", io);
-        runtime.getGlobalVariables().alias("$deferr", "$stderr");
+        context.runtime.defineVariable(new OutputGlobalVariable(context.runtime, "$stderr", io), GlobalVariable.Scope.GLOBAL);
+        objectClass(context).storeConstant(context, "STDERR", io);
+        globalVariables(context).alias("$deferr", "$stderr");
     }
 
     public void resetErrorWriter() {
@@ -1828,7 +1824,7 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      *
      * @return an error output stream that Ruby runtime has
      */
-    @Deprecated
+    @Deprecated(since = "1.5.0")
     public PrintStream getErr() {
         return getError();
     }
@@ -1844,7 +1840,6 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
         LocalContextProvider provider = getProvider();
         if (provider.isRuntimeInitialized()) {
             provider.getRuntime().tearDown(false);
-            provider.getRuntime().releaseClassLoader();
         }
         provider.terminate();
     }
@@ -1906,12 +1901,12 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      * add the given classloader to the LOAD_PATH
      * @param classloader
      */
-    @Deprecated
+    @Deprecated(since = "9.0.1.0")
     public void addLoadPath(ClassLoader classloader) {
         addLoadPath(createUri(classloader, "/.jrubydir"));
     }
 
-    @Deprecated
+    @Deprecated(since = "9.0.1.0")
     protected void addLoadPath(String uri) {
         runScriptlet( "$LOAD_PATH << '" + uri + "' unless $LOAD_PATH.member?( '" + uri + "' )" );
     }
@@ -1920,7 +1915,7 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
      * add the given classloader to the GEM_PATH
      * @param classloader
      */
-    @Deprecated
+    @Deprecated(since = "9.0.1.0")
     public void addGemPath(ClassLoader classloader) {
         addGemPath(createUri(classloader, "/specifications/.jrubydir"));
     }
@@ -1938,14 +1933,5 @@ public class ScriptingContainer implements EmbedRubyInstanceConfigAdapter {
 
     protected void addGemPath(String uri) {
         runScriptlet( "require 'rubygems';Gem::Specification.add_dir '" + uri + "' unless Gem::Specification.dirs.member?( '" + uri + "' )" );
-    }
-
-    @Deprecated
-    public org.jruby.CompatVersion getCompatVersion() {
-        return provider.getRubyInstanceConfig().getCompatVersion();
-    }
-
-    @Deprecated
-    public void setCompatVersion(org.jruby.CompatVersion version) {
     }
 }

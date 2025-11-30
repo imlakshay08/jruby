@@ -14,7 +14,6 @@ import org.jruby.RubyModule;
 import org.jruby.RubyRegexp;
 import org.jruby.RubyString;
 import org.jruby.RubySymbol;
-import org.jruby.common.IRubyWarnings.ID;
 import org.jruby.internal.runtime.methods.DynamicMethod;
 import org.jruby.internal.runtime.methods.UndefinedMethod;
 import org.jruby.runtime.Helpers;
@@ -30,8 +29,8 @@ import org.jruby.util.ByteList;
 import org.jruby.util.DefinedMessage;
 import org.jruby.util.RegexpOptions;
 
-import static org.jruby.util.RubyStringBuilder.str;
-import static org.jruby.util.RubyStringBuilder.ids;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Convert.asSymbol;
 
 public class RuntimeCache {
 
@@ -57,7 +56,7 @@ public class RuntimeCache {
     public final RubySymbol getSymbol(ThreadContext context, int index, String name, String encodingName) {
         RubySymbol symbol = symbols[index];
         if (symbol == null) {
-            symbol = context.runtime.newSymbol(name);
+            symbol = asSymbol(context, name);
             if (encodingName != null) {
                 symbol.associateEncoding(EncodingDB.getEncodings().get(encodingName.getBytes()).getEncoding());
             }
@@ -88,18 +87,12 @@ public class RuntimeCache {
 
     public final RubyFixnum getFixnum(ThreadContext context, int index, int value) {
         RubyFixnum fixnum = fixnums[index];
-        if (fixnum == null) {
-            return fixnums[index] = RubyFixnum.newFixnum(context.runtime, value);
-        }
-        return fixnum;
+        return fixnum == null ? fixnums[index] = asFixnum(context, value) : fixnum;
     }
 
     public final RubyFixnum getFixnum(ThreadContext context, int index, long value) {
         RubyFixnum fixnum = fixnums[index];
-        if (fixnum == null) {
-            return fixnums[index] = RubyFixnum.newFixnum(context.runtime, value);
-        }
-        return fixnum;
+        return fixnum == null ? fixnums[index] = asFixnum(context, value) : fixnum;
     }
 
     public final RubyFloat getFloat(ThreadContext context, int index, double value) {
@@ -124,9 +117,10 @@ public class RuntimeCache {
         return regexps[index];
     }
 
+    @Deprecated(since = "10.0.0.0")
     public final RubyRegexp cacheRegexp(int index, RubyString pattern, int options) {
         RubyRegexp regexp = regexps[index];
-        Ruby runtime = pattern.getRuntime();
+        Ruby runtime = pattern.getCurrentContext().runtime;
         if (regexp == null || runtime.getKCode() != regexp.getKCode()) {
             regexp = RubyRegexp.newRegexp(runtime, pattern.getByteList(), RegexpOptions.fromEmbeddedOptions(options));
             regexps[index] = regexp;
@@ -134,6 +128,7 @@ public class RuntimeCache {
         return regexp;
     }
 
+    @Deprecated(since = "10.0.0.0")
     public final RubyRegexp cacheRegexp(int index, RubyRegexp regexp) {
         regexps[index] = regexp;
         return regexp;
@@ -202,7 +197,7 @@ public class RuntimeCache {
         CallSite[] sites = new CallSite[pieces.length - 1 / 2];
 
         // if there's no call sites, don't process it
-        if (pieces[0].length() != 0) {
+        if (!pieces[0].isEmpty()) {
             for (int i = 0; i < pieces.length - 1; i+=2) {
                 switch (pieces[i + 1].charAt(0)) {
                 case 'N':
@@ -366,7 +361,7 @@ public class RuntimeCache {
     public IRubyObject reCache(ThreadContext context, StaticScope scope, String name, int index) {
         Invalidator invalidator = context.runtime.getConstantInvalidator(name);
         Object newGeneration = invalidator.getData();
-        IRubyObject value = scope.getConstant(name);
+        IRubyObject value = scope.getConstant(context, name);
         if (value != null) {
             constants[index] = new ConstantCache(value, newGeneration, invalidator);
         } else {
@@ -378,7 +373,7 @@ public class RuntimeCache {
     public final IRubyObject getConstantFrom(RubyModule target, ThreadContext context, String name, int index) {
         IRubyObject value = getValueFrom(target, context, name, index);
         // We can callsite cache const_missing if we want
-        return value != null ? value : target.getConstantFromConstMissing(name);
+        return value != null ? value : target.getConstantFromConstMissing(context, name);
     }
 
     public IRubyObject getValueFrom(RubyModule target, ThreadContext context, String name, int index) {
@@ -389,12 +384,11 @@ public class RuntimeCache {
     public IRubyObject reCacheFrom(RubyModule target, ThreadContext context, String name, int index) {
         Invalidator invalidator = context.runtime.getConstantInvalidator(name);
         Object newGeneration = invalidator.getData();
-        IRubyObject value = target.getConstantFromNoConstMissing(name, false);
-        if (value != null) {
-            constants[index] = new ConstantCache(value, newGeneration, invalidator, target.hashCode());
-        } else {
-            constants[index] = null;
-        }
+        IRubyObject value = target.getConstantFromNoConstMissing(context, name, false);
+
+        constants[index] = value != null ?
+                new ConstantCache(value, newGeneration, invalidator, target.id) : null;
+
         return value;
     }
 

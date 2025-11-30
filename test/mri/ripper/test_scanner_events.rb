@@ -24,12 +24,11 @@ class TestRipper::ScannerEvents < Test::Unit::TestCase
     lexer = Ripper::Lexer.new(str)
     if error
       lexer.singleton_class.class_eval do
-        define_method(:on_parse_error) { |ev|
+        define_method(:on_error) {|ev|
           yield __callee__, ev, token()
         }
-        define_method(:compile_error) { |ev|
-          yield __callee__, ev, token()
-        }
+        alias on_parse_error on_error
+        alias compile_error on_error
       end
     end
     lexer.lex.select {|_,type,_| type == sym }.map {|_,_,tok| tok }
@@ -54,6 +53,8 @@ class TestRipper::ScannerEvents < Test::Unit::TestCase
                  Ripper.tokenize("1  .foo\n")
     assert_equal ["1", "\n", "  ", ".", "foo", "\n"],
                  Ripper.tokenize("1\n  .foo\n")
+    assert_equal ["def", " ", "f", ";", " ", "(", "x", ")", "::", "A", " ", "="],
+                 Ripper.tokenize("def f; (x)::A =")
   end
 
   def test_lex
@@ -114,11 +115,11 @@ class TestRipper::ScannerEvents < Test::Unit::TestCase
                   [[5, 0], :on_imaginary, "5.6ri", Ripper::EXPR_END],
                  ],
                  Ripper.lex("1r\n2i\n3ri\n4.2r\n5.6ri")
-     assert_lex   [[[1, 0], :on_heredoc_beg, "<<~EOS", Ripper::EXPR_BEG],
-                   [[1, 6], :on_nl, "\n", Ripper::EXPR_BEG],
-                   [[2, 0], :on_ignored_sp, "  ", Ripper::EXPR_BEG],
-                   [[2, 2], :on_tstring_content, "heredoc\n", Ripper::EXPR_BEG],
-                   [[3, 0], :on_heredoc_end, "EOS", Ripper::EXPR_BEG]
+    assert_lex   [[[1, 0], :on_heredoc_beg, "<<~EOS", Ripper::EXPR_BEG],
+                  [[1, 6], :on_nl, "\n", Ripper::EXPR_BEG],
+                  [[2, 0], :on_ignored_sp, "  ", Ripper::EXPR_BEG],
+                  [[2, 2], :on_tstring_content, "heredoc\n", Ripper::EXPR_BEG],
+                  [[3, 0], :on_heredoc_end, "EOS", Ripper::EXPR_BEG]
                  ],
                  Ripper.lex("<<~EOS\n  heredoc\nEOS")
     assert_lex   [[[1, 0], :on_tstring_beg, "'", Ripper::EXPR_BEG],
@@ -178,6 +179,11 @@ class TestRipper::ScannerEvents < Test::Unit::TestCase
   def test_backtick
     assert_equal ["`"],
                  scan('backtick', %q[p `make all`])
+  end
+
+  def test_colon2_call
+    assert_equal ["::"],
+                 scan('op', %q[ a::b ])
   end
 
   def test_comma
@@ -713,7 +719,7 @@ class TestRipper::ScannerEvents < Test::Unit::TestCase
                  scan('words_sep', '%w( w w w )')
     assert_equal [' ', "\n", ' ', ' '],
                  scan('words_sep', "%w( w\nw w )")
-    assert_equal ["\n\n", "\n ", ' ', ' '],
+    assert_equal ["\n", "\n", "\n", ' ', ' ', ' '],
                  scan('words_sep', "%w(\n\nw\n w w )")
   end
 
@@ -946,6 +952,10 @@ class TestRipper::ScannerEvents < Test::Unit::TestCase
                  scan('CHAR', "?\\u{41}")
 
     err = nil
+    assert_equal [], scan('CHAR', '?\\') {|*e| err = e}
+    assert_equal([:on_parse_error, "Invalid escape character syntax", "?\\"], err)
+
+    err = nil
     assert_equal [], scan('CHAR', '?\\M ') {|*e| err = e}
     assert_equal([:on_parse_error, "Invalid escape character syntax", "?\\M "], err)
 
@@ -987,13 +997,27 @@ class TestRipper::ScannerEvents < Test::Unit::TestCase
     assert_equal("\e", err[2])
   end
 
-  def test_invalid_hex_escape
+  def test_invalid_escape
     err = nil
-    assert_equal ['U'], scan('tstring_content', '"\\xU"') {|*e| err = e}
-    assert_equal [:on_parse_error, "invalid hex escape", "\\x"], err
+    assert_equal ["\\C-\u{3042}"], scan('tstring_content', %["\\C-\u{3042}"]) {|*e| err = e}
+    assert_equal [:on_parse_error, "Invalid escape character syntax", "\\C-\u{3042}"], err
+  end
 
+  def test_invalid_hex_escape_string
     err = nil
-    assert_equal ['U'], scan('tstring_content', '/\\xU/') {|*e| err = e}
+    assert_equal ['\\x', 'U'], scan('tstring_content', '"\\xU"') {|*e| err = e}
     assert_equal [:on_parse_error, "invalid hex escape", "\\x"], err
+  end
+
+  def test_invalid_hex_escape_regexp
+    err = nil
+    assert_equal ['\\x', 'U'], scan('tstring_content', '/\\xU/') {|*e| err = e}
+    assert_equal [:on_parse_error, "invalid hex escape", "\\x"], err
+  end
+
+  def test_error_token
+    src = "{a:,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n""hello}"
+    err = scan('parse_error', src) {|*e| break e}
+    assert_equal "", err[2]
   end
 end if ripper_test

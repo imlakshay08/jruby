@@ -12,7 +12,7 @@ DO NOT MODIFY - GENERATED CODE
   <parent>
     <groupId>org.jruby</groupId>
     <artifactId>jruby-parent</artifactId>
-    <version>9.4.10.0-SNAPSHOT</version>
+    <version>10.0.3.0-SNAPSHOT</version>
   </parent>
   <artifactId>jruby-core</artifactId>
   <name>JRuby Core</name>
@@ -55,9 +55,11 @@ DO NOT MODIFY - GENERATED CODE
               </relocations>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <mainClass>org.jruby.Main</mainClass>
+                  <mainClass>org.jruby.main.Main</mainClass>
                   <manifestEntries>
                     <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
+                    <Add-Opens>java.base/java.io java.base/java.nio.channels java.base/sun.nio.ch java.management/sun.management</Add-Opens>
+                    <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
                   </manifestEntries>
                 </transformer>
               </transformers>
@@ -70,6 +72,7 @@ DO NOT MODIFY - GENERATED CODE
       <plugin>
         <groupId>com.coderplus.maven.plugins</groupId>
         <artifactId>copy-rename-maven-plugin</artifactId>
+        <version>1.0</version>
         <executions>
           <execution>
             <id>copy to lib/jruby.jar</id>
@@ -96,9 +99,9 @@ DO NOT MODIFY - GENERATED CODE
           <showWarnings>true</showWarnings>
           <showDeprecation>true</showDeprecation>
           <source>${base.java.version}</source>
-          <source>1.8</source>
+          <source>17</source>
           <target>${base.javac.version}</target>
-          <target>1.8</target>
+          <target>17</target>
           <useIncrementalCompilation>false</useIncrementalCompilation>
         </configuration>
       </plugin>
@@ -145,7 +148,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -162,6 +165,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -200,7 +209,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -217,6 +226,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -255,7 +270,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -272,6 +287,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -310,7 +331,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -327,6 +348,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -365,7 +392,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -382,6 +409,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -420,7 +453,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -437,6 +470,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -475,7 +514,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -492,6 +531,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -530,7 +575,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -547,6 +592,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -585,7 +636,7 @@ DO NOT MODIFY - GENERATED CODE
                   </relocations>
                   <transformers>
                     <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                      <mainClass>org.jruby.Main</mainClass>
+                      <mainClass>org.jruby.main.Main</mainClass>
                       <manifestEntries>
                         <Automatic-Module-Name>org.jruby.dist</Automatic-Module-Name>
                       </manifestEntries>
@@ -602,6 +653,12 @@ DO NOT MODIFY - GENERATED CODE
                 </configuration>
               </execution>
             </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <configuration>
+              <failOnError>false</failOnError>
+            </configuration>
           </plugin>
         </plugins>
       </build>

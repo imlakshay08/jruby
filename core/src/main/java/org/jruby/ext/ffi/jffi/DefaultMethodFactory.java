@@ -30,6 +30,11 @@ import org.jruby.runtime.Block;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
+import static org.jruby.api.Convert.asFloat;
+import static org.jruby.api.Convert.toDouble;
+import static org.jruby.api.Create.dupString;
+import static org.jruby.api.Error.*;
+
 
 public final class DefaultMethodFactory extends MethodFactory {
 
@@ -58,7 +63,7 @@ public final class DefaultMethodFactory extends MethodFactory {
         for (int i = 0; i < parameterTypes.length; ++i)  {
             marshallers[i] = getMarshaller(parameterTypes[i], convention, enums);
             if (marshallers[i] == null) {
-                throw module.getRuntime().newTypeError("Could not create marshaller for " + parameterTypes[i]);
+                throw typeError(module.getRuntime().getCurrentContext(), "Could not create marshaller for " + parameterTypes[i]);
             }
         }
 
@@ -92,7 +97,7 @@ public final class DefaultMethodFactory extends MethodFactory {
             // throw an exception
         }
 
-        throw returnType.getRuntime().newTypeError("Cannot get FunctionInvoker for " + returnType);
+        throw typeError(returnType.getRuntime().getCurrentContext(), "Cannot get FunctionInvoker for " + returnType);
     }
 
     static FunctionInvoker getFunctionInvoker(NativeType returnType) {
@@ -149,8 +154,7 @@ public final class DefaultMethodFactory extends MethodFactory {
      */
     static ParameterMarshaller getMarshaller(Type type, CallingConvention convention, IRubyObject enums) {
         if (enums != null && !enums.isNil() && !(enums instanceof RubyHash || enums instanceof Enums)) {
-            throw type.getRuntime().newArgumentError("wrong argument type "
-                    + enums.getMetaClass().getName() + " (expected Hash or Enums)");
+            typeError(type.getRuntime().getCurrentContext(), enums, "Hash or Enums");
         }
 
         if (type instanceof Type.Builtin) {
@@ -192,10 +196,8 @@ public final class DefaultMethodFactory extends MethodFactory {
      * @return A new <code>ParameterMarshaller</code>
      */
     static ParameterMarshaller getEnumMarshaller(Type type, CallingConvention convention, IRubyObject enums) {
-        if (enums != null && !enums.isNil() && !(enums instanceof RubyHash || enums instanceof Enums)) {
-            throw type.getRuntime().newArgumentError("wrong argument type "
-                    + enums.getMetaClass().getName() + " (expected Hash or Enums)");
-        }
+        if (!(enums instanceof Enums)) typeError(type.getRuntime().getCurrentContext(), enums, "Enums");
+
         NativeDataConverter converter = DataConverters.getParameterConverter(type, (Enums)enums);
         ParameterMarshaller marshaller = getMarshaller(type.getNativeType());
         return converter != null ? new ConvertingMarshaller(marshaller, converter) : marshaller;
@@ -377,7 +379,7 @@ public final class DefaultMethodFactory extends MethodFactory {
     private static final class Float32Invoker extends BaseInvoker {
         public static final FunctionInvoker INSTANCE = new Float32Invoker();
         public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
-            return context.runtime.newFloat(invoker.invokeFloat(function, args));
+            return asFloat(context, invoker.invokeFloat(function, args));
         }
     }
 
@@ -388,7 +390,7 @@ public final class DefaultMethodFactory extends MethodFactory {
     private static final class Float64Invoker extends BaseInvoker {
         public static final FunctionInvoker INSTANCE = new Float64Invoker();
         public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
-            return context.runtime.newFloat(invoker.invokeDouble(function, args));
+            return asFloat(context, invoker.invokeDouble(function, args));
         }
     }
     
@@ -399,7 +401,7 @@ public final class DefaultMethodFactory extends MethodFactory {
     private static final class Float128Invoker extends BaseInvoker {
         public static final FunctionInvoker INSTANCE = new Float128Invoker();
         public final IRubyObject invoke(ThreadContext context, Function function, HeapInvocationBuffer args) {
-            return context.runtime.newFloat(0); // not implemented
+            return asFloat(context, 0); // not implemented
         }
     }
 
@@ -453,8 +455,7 @@ public final class DefaultMethodFactory extends MethodFactory {
             MemoryIO mem = buf.getMemoryIO();
             byte[] array;
             int arrayOffset;
-            if (mem instanceof ArrayMemoryIO) {
-                ArrayMemoryIO arrayMemoryIO = (ArrayMemoryIO) mem;
+            if (mem instanceof ArrayMemoryIO arrayMemoryIO) {
                 array = arrayMemoryIO.array();
                 arrayOffset = arrayMemoryIO.arrayOffset();
             } else {
@@ -464,9 +465,7 @@ public final class DefaultMethodFactory extends MethodFactory {
 
             invoker.invokeStruct(function, args, array, arrayOffset);
 
-            if (!(mem instanceof ArrayMemoryIO)) {
-                mem.put(0, array, 0, array.length);
-            }
+            if (!(mem instanceof ArrayMemoryIO)) mem.put(0, array, 0, array.length);
 
             return info.getStructClass().newInstance(context, buf, Block.NULL_BLOCK);
         }
@@ -604,7 +603,7 @@ public final class DefaultMethodFactory extends MethodFactory {
     static final class Float32Marshaller extends NonSessionMarshaller {
         public static final ParameterMarshaller INSTANCE = new Float32Marshaller();
         public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
-            buffer.putFloat((float) RubyNumeric.num2dbl(parameter));
+            buffer.putFloat((float) toDouble(context, parameter));
         }
     }
 
@@ -614,7 +613,7 @@ public final class DefaultMethodFactory extends MethodFactory {
     static final class Float64Marshaller extends NonSessionMarshaller {
         public static final ParameterMarshaller INSTANCE = new Float64Marshaller();
         public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
-            buffer.putDouble(RubyNumeric.num2dbl(parameter));
+            buffer.putDouble(toDouble(context, parameter));
         }
     }
     
@@ -641,20 +640,14 @@ public final class DefaultMethodFactory extends MethodFactory {
 
             } else {
                 if (ArrayFlags.isOut(flags)) {
-                    if (parameter instanceof RubyString) {
-                        RubyString parameterStr = (RubyString) parameter;
-
-                        if (parameterStr.isFrozen()) {
-                            parameterStr = parameterStr.strDup(context.runtime);
-                        }
-
-                        // ensure string is modifiable
-                        parameterStr.modify();
+                    if (parameter instanceof RubyString parmStr) {
+                        if (parmStr.isFrozen()) parmStr = dupString(context, parmStr);
+                        parmStr.modify(); // ensure string is modifiable
                     }
                 }
 
-                buffer.putArray(byte[].class.cast(strategy.object(parameter)), strategy.offset(parameter), strategy.length(parameter),
-                        flags);
+                buffer.putArray(byte[].class.cast(strategy.object(parameter)), strategy.offset(parameter),
+                        strategy.length(parameter), flags);
             }
         }
     }
@@ -701,29 +694,19 @@ public final class DefaultMethodFactory extends MethodFactory {
 
 
         public final void marshal(ThreadContext context, InvocationBuffer buffer, IRubyObject parameter) {
-            if (!(parameter instanceof Struct)) {
-                throw context.runtime.newTypeError("wrong argument type "
-                        + parameter.getMetaClass().getName() + " (expected instance of FFI::Struct)");
-            }
+            if (!(parameter instanceof Struct struct)) throw typeError(context, parameter, "instance of FFI::Struct");
 
-            final AbstractMemory memory = ((Struct) parameter).getMemory();
-            if (memory.getSize() < layout.getSize()) {
-                throw context.runtime.newArgumentError("struct memory too small for parameter");
-            }
+            final AbstractMemory memory = struct.getMemory();
+            if (memory.getSize() < layout.getSize()) throw argumentError(context, "struct memory too small for parameter");
 
             final MemoryIO io = memory.getMemoryIO();
             if (io.isDirect()) {
-                if (io.isNull()) {
-                    throw context.runtime.newRuntimeError("Cannot use a NULL pointer as a struct by value argument");
-                }
+                if (io.isNull()) throw runtimeError(context, "Cannot use a NULL pointer as a struct by value argument");
                 buffer.putStruct(io.address());
-
-            } else if (io instanceof ArrayMemoryIO) {
-                ArrayMemoryIO aio = (ArrayMemoryIO) io;
+            } else if (io instanceof ArrayMemoryIO aio) {
                 buffer.putStruct(aio.array(), aio.arrayOffset());
-
             } else {
-                throw context.runtime.newRuntimeError("invalid struct memory");
+                throw runtimeError(context, "invalid struct memory");
             }
         }
     }

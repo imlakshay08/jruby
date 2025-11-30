@@ -7,6 +7,7 @@ import org.jruby.ParseResult;
 import org.jruby.RubyInstanceConfig;
 import org.jruby.RubySymbol;
 import org.jruby.ast.IterNode;
+import org.jruby.ast.StrNode;
 import org.jruby.common.IRubyWarnings;
 import org.jruby.ext.coverage.CoverageData;
 import org.jruby.ir.IRClassBody;
@@ -52,7 +53,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
+import static org.jruby.api.Warn.warning;
 import static org.jruby.ir.IRFlags.*;
+import static org.jruby.ir.builder.StringStyle.Frozen;
+import static org.jruby.ir.builder.StringStyle.Mutable;
 import static org.jruby.ir.instructions.Instr.EMPTY_OPERANDS;
 import static org.jruby.ir.instructions.IntegerMathInstr.Op.ADD;
 import static org.jruby.ir.instructions.IntegerMathInstr.Op.SUBTRACT;
@@ -70,10 +74,10 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
     private boolean parserTiming = Options.PARSER_SUMMARY.load();
     private final IRManager manager;
     protected final IRScope scope;
-    protected final IRBuilder parent;
+    protected final IRBuilder<U, V, W, X, Y, Z> parent;
     protected final List<Instr> instructions;
     protected int coverageMode;
-    protected IRBuilder variableBuilder;
+    protected IRBuilder<U, V, W, X, Y, Z> variableBuilder;
     protected List<Object> argumentDescriptions;
     public boolean executesOnce = true;
     int temporaryVariableIndex = -1;
@@ -140,7 +144,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
     private boolean selfUsed = false;
     private boolean currentModuleUsed = false;
 
-    public IRBuilder(IRManager manager, IRScope scope, IRBuilder parent, IRBuilder variableBuilder, Encoding encoding) {
+    public IRBuilder(IRManager manager, IRScope scope, IRBuilder<U, V, W, X, Y, Z> parent, IRBuilder<U, V, W, X, Y, Z> variableBuilder, Encoding encoding) {
         this.manager = manager;
         this.scope = scope;
         this.parent = parent;
@@ -249,7 +253,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     public InterpreterContext buildEvalRoot(ParseResult rootNode) {
         executesOnce = false;
-        coverageMode = CoverageData.NONE;  // Assuming there is no path into build eval root without actually being an eval.
+        coverageMode = rootNode.getCoverageMode();
         addInstr(getManager().newLineNumber(scope.getLine()));
 
         afterPrologueIndex = instructions.size() - 1;                      // added BEGINs start after scope prologue stuff
@@ -325,7 +329,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         label("empty", (empty) ->
                 cond(empty, result, tru(), ()->
                         addInstr(new BuildCompoundStringInstr(errorString, new Operand[] {value, new FrozenString(" is not empty")},
-                                UTF8Encoding.INSTANCE, 13, true, getFileName(), lastProcessedLineNum))));
+                                UTF8Encoding.INSTANCE, 13, Frozen, getFileName(), lastProcessedLineNum))));
     }
     protected RubySymbol methodNameFor() {
         IRScope method = scope.getNearestMethod();
@@ -457,8 +461,8 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         // Protected region code
         addInstr(new LabelInstr(rBeginLabel));
         addInstr(new ExceptionRegionStartMarkerInstr(rescueLabel));
-        Object v1 = protectedCode.run(); // YIELD: Run the protected code block
-        addInstr(new CopyInstr(rv, (Operand)v1));
+        Operand v1 = protectedCode.run(); // YIELD: Run the protected code block
+        addInstr(new CopyInstr(rv, v1));
         addInstr(new JumpInstr(rEndLabel));
         addInstr(new ExceptionRegionEndMarkerInstr());
 
@@ -523,9 +527,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     // FIXME: Add this to clone on branch instrs so if something changes (like an inline) it will replace with opted branch/jump/nop.
     public static Instr createBranch(Operand v1, Operand v2, Label jmpTarget) {
-        if (v2 instanceof Boolean) {
-            Boolean lhs = (Boolean) v2;
-
+        if (v2 instanceof Boolean lhs) {
             if (lhs.isTrue()) {
                 if (v1.isTruthyImmediate()) return new JumpInstr(jmpTarget);
                 if (v1.isFalseyImmediate()) return NopInstr.NOP;
@@ -667,8 +669,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         if (instr instanceof ReceiveKeywordRestArgInstr) {
             // Always add the keyword rest arg to the beginning
             keywordArgs.add(0, new KeyValuePair<>(Symbol.KW_REST_ARG_DUMMY, ((ReceiveArgBase) instr).getResult()));
-        } else if (instr instanceof ReceiveKeywordArgInstr) {
-            ReceiveKeywordArgInstr receiveKwargInstr = (ReceiveKeywordArgInstr) instr;
+        } else if (instr instanceof ReceiveKeywordArgInstr receiveKwargInstr) {
             keywordArgs.add(new KeyValuePair<>(new Symbol(receiveKwargInstr.getKey()), receiveKwargInstr.getResult()));
         } else if (instr instanceof ReceiveRestArgInstr) {
             callArgs.add(new Splat(((ReceiveRestArgInstr) instr).getResult()));
@@ -733,13 +734,13 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         addInstr(new LabelInstr(rEndLabel));
     }
 
-    private Operand receiveBreakException(Operand block, CodeBlock codeBlock) {
+    private void receiveBreakException(Operand block, CodeBlock codeBlock) {
         // Check if we have to handle a break
-        if (block == null ||
-                !(block instanceof WrappedIRClosure) ||
+        if (!(block instanceof WrappedIRClosure) ||
                 !(((WrappedIRClosure) block).getClosure()).hasBreakInstructions()) {
             // No protection needed -- add the call and return
-            return codeBlock.run();
+            codeBlock.run();
+            return;
         }
 
         Label rBeginLabel = getNewLabel();
@@ -764,8 +765,6 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
         // End
         addInstr(new LabelInstr(rEndLabel));
-
-        return callResult;
     }
 
     // for simple calls without splats or keywords
@@ -798,13 +797,19 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         body.apply();
     }
 
-    // if-only
-    protected void cond_ne(Label label, Operand value, Operand test) {
-        addInstr(BNEInstr.create(label, value, test));
+    // if-only true
+    protected void cond_ne_true(Label label, Operand value) {
+        addInstr(new BFalseInstr(label, value));
     }
-    // if !test/else
-    protected void cond_ne(Label endLabel, Operand value, Operand test, RunIt body) {
-        addInstr(BNEInstr.create(endLabel, value, test));
+
+    // if-only false
+    protected void cond_ne_false(Label label, Operand value) {
+        addInstr(new BTrueInstr(label, value));
+    }
+
+    // if !test/else nil
+    protected void cond_ne_nil(Label endLabel, Operand value, RunIt body) {
+        addInstr(BNEInstr.create(endLabel, value, nil()));
         body.apply();
     }
 
@@ -895,14 +900,6 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         return manager.getNil();
     }
 
-    private boolean hackCheckUSASCII(byte[] bytes) {
-        for (int i = 0; i < bytes.length; i++) {
-            if (bytes[i] < 0) return false;
-        }
-
-        return true;
-    }
-
     protected RubySymbol symbol(String id) {
         return manager.runtime.newSymbol(id);
     }
@@ -977,9 +974,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
     }
 
     protected Variable getValueInTemporaryVariable(Operand val) {
-        if (val != null && val instanceof TemporaryVariable) return (Variable) val;
-
-        return copy(val);
+        return val instanceof TemporaryVariable ? (Variable) val : copy(val);
     }
 
     /**
@@ -1008,7 +1003,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             return args;
         }
 
-        return callArgs.toArray(new Operand[callArgs.size()]);
+        return callArgs.toArray(new Operand[0]);
     }
 
 
@@ -1057,17 +1052,17 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     // Note: passing NORMAL just removes ability to remove a branch and will be semantically correct.
     protected Operand buildAnd(Operand left, CodeBlock right, BinaryType truth) {
-        switch(truth) {
-            case LeftTrue:  // left is statically true so we return whatever right expr is.
-                return right.run();
-            case LeftFalse: // left is already false.  we done.
-                return left;
-        }
+        return switch (truth) {
+            // left is statically true so we return whatever right expr is.
+            case LeftTrue -> right.run();
+            // left is already false.  we done.
+            case LeftFalse -> left;
+            default -> tap(getValueInTemporaryVariable(left), (ret) ->
+                    label("and", (label) ->
+                            cond(label, left, fals(), () ->
+                                    copy((Variable) ret, right.run()))));
+        };
 
-        return tap(getValueInTemporaryVariable(left), (ret) ->
-                label("and", (label) ->
-                        cond(label, left, fals(), () ->
-                                copy((Variable) ret, right.run()))));
     }
 
     protected Operand buildBreak(CodeBlock value, int line) {
@@ -1284,6 +1279,8 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         return result;
     }
 
+    // Pre-Ruby 3.4 path for JRuby 9.4.x.
+    @Deprecated(since = "10.0.0.0")
     protected Operand buildDStr(Variable result, U[] nodePieces, Encoding encoding, boolean isFrozen, int line) {
         if (result == null) result = temp();
 
@@ -1294,7 +1291,22 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             estimatedSize += dynamicPiece(pieces, i, nodePieces[i], null);
         }
 
-        addInstr(new BuildCompoundStringInstr(result, pieces, encoding, estimatedSize, isFrozen, getFileName(), line));
+        addInstr(new BuildCompoundStringInstr(result, pieces, encoding, estimatedSize, isFrozen ? Frozen : Mutable, getFileName(), line));
+
+        return result;
+    }
+
+    protected Operand buildDStr(Variable result, U[] nodePieces, Encoding encoding, StringStyle stringStyle, int line) {
+        if (result == null) result = temp();
+
+        Operand[] pieces = new Operand[nodePieces.length];
+        int estimatedSize = 0;
+
+        for (int i = 0; i < pieces.length; i++) {
+            estimatedSize += dynamicPiece(pieces, i, nodePieces[i], null);
+        }
+
+        addInstr(new BuildCompoundStringInstr(result, pieces, encoding, estimatedSize, stringStyle, getFileName(), line));
 
         return result;
     }
@@ -1337,7 +1349,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             Fixnum s2 = manager.newFixnum(2);
 
             // Create a variable to hold the flip state
-            IRBuilder nearestNonClosureBuilder = getNearestFlipVariableScopeBuilder();
+            IRBuilder<U, V, W, X, Y, Z> nearestNonClosureBuilder = getNearestFlipVariableScopeBuilder();
 
             // Flip is completely broken atm and it was semi-broken in its last incarnation.
             // Method and closures (or evals) are not built at the same time and if -X-C or JIT or AOT
@@ -1380,7 +1392,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
             // ----- Code for when we are in state 1 -----
             Operand s1Val = build(begin);
-            addInstr(BNEInstr.create(s2Label, s1Val, tru()));
+            addInstr(new BFalseInstr(s2Label, s1Val));
 
             // s1 condition is true => set returnVal to true & move to state 2
             addInstr(new CopyInstr(returnVal, tru()));
@@ -1398,7 +1410,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             // ----- Code for when we are in state 2 -----
             Operand s2Val = build(end);
             addInstr(new CopyInstr(returnVal, tru()));
-            addInstr(BNEInstr.create(doneLabel, s2Val, tru()));
+            addInstr(new BFalseInstr(doneLabel, s2Val));
 
             // s2 condition is true => move to state 1
             addInstr(new CopyInstr(flipState, s1));
@@ -1554,7 +1566,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         // FIXME: Made for backwards compat for Prism not having this method in all versions (0.15).
     }
 
-    protected InterpreterContext buildIterInner(RubySymbol methodName, U var, U body, int endLine) {
+    protected void buildIterInner(RubySymbol methodName, U var, U body, int endLine) {
         long time = 0;
         if (parserTiming) time = System.nanoTime();
         this.methodName = methodName;
@@ -1591,11 +1603,9 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         if (!forNode) handleBreakAndReturnsInLambdas();
 
         computeScopeFlagsFrom(instructions);
-        InterpreterContext ic = scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
+        scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
 
         if (parserTiming) manager.getRuntime().getParserManager().getParserStats().addIRBuildTime(System.nanoTime() - time);
-
-        return ic;
     }
 
     public Operand buildLambda(U args, U body, StaticScope staticScope, Signature signature, int line) {
@@ -1611,7 +1621,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         return lambda;
     }
 
-    protected InterpreterContext buildLambdaInner(U blockArgs, U body) {
+    protected void buildLambdaInner(U blockArgs, U body) {
         long time = 0;
         if (parserTiming) time = System.nanoTime();
 
@@ -1627,11 +1637,9 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         handleBreakAndReturnsInLambdas();
 
         computeScopeFlagsFrom(instructions);
-        InterpreterContext ic = scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
+        scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
 
         if (parserTiming) manager.getRuntime().getParserManager().getParserStats().addIRBuildTime(System.nanoTime() - time);
-
-        return ic;
     }
 
     protected Operand buildLocalVariableAssign(RubySymbol name, int depth, U valueNode) {
@@ -1752,7 +1760,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         return bodyResult;
     }
 
-    protected InterpreterContext buildModuleOrClassBody(U body, int startLine, int endLine) {
+    protected void buildModuleOrClassBody(U body, int startLine, int endLine) {
         addInstr(new TraceInstr(RubyEvent.CLASS, getCurrentModuleVariable(), null, getFileName(), startLine + 1));
 
         Operand bodyReturnValue = build(body);
@@ -1767,7 +1775,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         prependUsedImplicitState(null);
 
         computeScopeFlagsFrom(instructions);
-        return scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
+        scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
     }
 
     protected Operand buildNext(final Operand rv, int line) {
@@ -1799,7 +1807,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
     }
 
     protected Operand buildNthRef(int matchNumber) {
-        return copy(new NthRef(scope, matchNumber));
+        return addResultInstr(new BuildNthRefInstr(temp(), matchNumber));
     }
 
     // FIXME: The logic for lazy and non-lazy building is pretty icky...clean up
@@ -1893,7 +1901,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         addInstr(BNEInstr.create(falseCheck, result, UndefinedValue.UNDEFINED));
         addInstr(new JumpInstr(assign));
         addInstr(new LabelInstr(falseCheck));
-        addInstr(BNEInstr.create(done, result, fals()));
+        addInstr(new BTrueInstr(done, result));
         addInstr(new LabelInstr(assign));
         Operand rhsValue = build(right);
         copy(result, rhsValue);
@@ -1916,7 +1924,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     protected abstract Operand buildColon2ForConstAsgnDeclNode(U lhs, Variable valueResult, boolean constMissing);
 
-    @Deprecated
+    @Deprecated(since = "9.4.7.0")
     protected Operand buildOpAsgnConstDecl(Y left, U right, RubySymbol operator) {
         Operand lhs = build((U) left);
         Operand rhs = build(right);
@@ -1932,7 +1940,9 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         return copy(temp(), putConstant(parent, name, result));
     }
 
+    @Deprecated(since = "10.0.0.0")
     protected abstract Operand putConstant(Y constant, Operand value);
+    protected abstract Operand putConstant(Y constant, CodeBlock value);
 
     protected Operand buildOpAsgnOr(CodeBlock lhs, CodeBlock rhs) {
         Label done = getNewLabel();
@@ -2068,7 +2078,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         buildPatternDeconstructRespondTo(testEnd, result, obj, isSinglePattern, errorString, "deconstruct");
 
         label("deconstruct_cache_end", (deconstruct_cache_end) ->
-                cond_ne(deconstruct_cache_end, deconstructed, nil(), () -> {
+                cond_ne_nil(deconstruct_cache_end, deconstructed, () -> {
                     call(deconstructed, obj, "deconstruct");
                     label("array_check_end", arrayCheck -> {
                         addInstr(new EQQInstr(scope, result, getManager().getArrayClass(), deconstructed, false, true, false));
@@ -2088,7 +2098,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             for (int i = 0; i < preArgsSize; i++) {
                 Variable elt = call(temp(), deconstructed, "[]", fix(i));
                 buildPatternEach(testEnd, result, obj, copy(nil()), elt, pre[i], inAlteration, isSinglePattern, errorString);
-                cond_ne(testEnd, result, tru());
+                cond_ne_true(testEnd, result);
             }
         }
 
@@ -2101,7 +2111,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
                 Variable elt = call(temp(), deconstructed, "[]", min, max);
 
                 buildPatternMatch(result, obj, copy(nil()), rest, elt, inAlteration, isSinglePattern, errorString);
-                cond_ne(testEnd, result, tru());
+                cond_ne_true(testEnd, result);
             }
         }
 
@@ -2112,7 +2122,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
                 Variable elt = call(temp(), deconstructed, "[]", k);
 
                 buildPatternEach(testEnd, result, obj, copy(nil()), elt, post[i], inAlteration, isSinglePattern, errorString);
-                cond_ne(testEnd, result, tru());
+                cond_ne_true(testEnd, result);
             }
         }
     }
@@ -2123,7 +2133,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         if (isSinglePattern) {
             buildPatternSetEQQError(errorString, result, obj, expression, obj);
         }
-        cond_ne(testEnd, result, tru());
+        cond_ne_true(testEnd, result);
     }
 
     protected void buildPatternSetEQQError(Variable errorString, Variable result, Operand obj, Operand expression, Operand value) {
@@ -2132,7 +2142,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     protected void buildPatternSetGeneralError(Variable errorString, Variable result, Operand... args) {
         label("match_succeeded", (matchSucceeded) -> {
-            cond_ne(matchSucceeded, result, fals());
+            cond_ne_false(matchSucceeded, result);
             fcall(errorString, getManager().getObjectClass(), "sprintf", args);
         });
     }
@@ -2142,8 +2152,8 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
                           Variable errorString) {
         if (constant != null) buildPatternConstant(testEnd, result, constant, obj, isSinglePattern, errorString);
 
-        label("deconstruct_end", deconstructCheck -> {
-            cond_ne(deconstructCheck, deconstructed, nil(), () -> {
+        label("deconstruct_end", deconstructCheck ->
+            cond_ne_nil(deconstructCheck, deconstructed, () -> {
                 buildPatternDeconstructRespondTo(testEnd, result, obj, isSinglePattern, errorString, "deconstruct");
 
                 call(deconstructed, obj, "deconstruct");
@@ -2151,8 +2161,8 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
                     addInstr(new EQQInstr(scope, result, getManager().getArrayClass(), deconstructed, false, true, false));
                     cond(arrayCheck, result, tru(), () -> type_error("deconstruct must return Array"));
                 });
-            });
-        });
+            })
+        );
 
         Variable length = addResultInstr(new RuntimeHelperCall(intTemp(), ARRAY_LENGTH, new Operand[]{deconstructed}));
         int fixedArgsLength = args.length;
@@ -2173,14 +2183,14 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
                         Operand deconstructFixnum = as_fixnum(deconstructIndex);
                         Operand test = call(temp(), deconstructed, "[]", deconstructFixnum);
                         buildPatternMatch(result, obj, copy(nil()), pat, test, false, isSinglePattern, errorString);
-                        cond_ne(bottom, result, tru());
+                        cond_ne_true(bottom, result);
                     });
 
                     if (pre != null && !isBareStar(pre)) {
                         Operand iFixnum = as_fixnum(i);
                         Operand test = call(temp(), deconstructed, "[]", getManager().newFixnum(0), iFixnum);
                         buildPatternMatch(result, obj, copy(nil()), pre, test, false, isSinglePattern, errorString);
-                        cond_ne(bottom, result, tru());
+                        cond_ne_true(bottom, result);
                     }
 
                     if (post != null && !isBareStar(post)) {
@@ -2189,7 +2199,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
                         Operand lengthFixnum = as_fixnum(length);
                         Operand test = call(temp(), deconstructed, "[]", deconstructFixnum, lengthFixnum);
                         buildPatternMatch(result, obj, copy(nil()), post, test, false, isSinglePattern, errorString);
-                        cond_ne(bottom, result, tru());
+                        cond_ne_true(bottom, result);
                     }
                     jump(after);
                 });
@@ -2214,7 +2224,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         if (isSinglePattern) {
             buildPatternSetGeneralError(errorString, result, new FrozenString("%s: %s does not respond to #" + methodName), obj, obj);
         }
-        cond_ne(testEnd, result, tru());
+        cond_ne_true(testEnd, result);
     }
 
     protected Operand buildPatternCase(U test, U[] cases, U consequent) {
@@ -2296,7 +2306,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             buildPatternMatch(result, original, deconstructed, elseBody, value, inAlternation, isSinglePattern, errorString);
         }
         label("if_else_end", conditionalEnd -> {
-            cond_ne(conditionalEnd, result, tru());
+            cond_ne_true(conditionalEnd, result);
             Operand ifResult = build(condition);
             if (unless) {
                 call(result, ifResult, "!"); // FIXME: need non-dynamic dispatch to reverse result
@@ -2328,17 +2338,17 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         } else {
             call(result, d, "empty?");
             if (isSinglePattern) maybeGenerateIsNotEmptyErrorString(errorString, result, d);
-            cond_ne(testEnd, result, tru());
+            cond_ne_true(testEnd, result);
         }
 
         if (hasRest) {
             if (isNilRest(rest)) {
                 call(result, d, "empty?");
                 if (isSinglePattern) maybeGenerateIsNotEmptyErrorString(errorString, result, d);
-                cond_ne(testEnd, result, tru());
+                cond_ne_true(testEnd, result);
             } else if (!isBareStar(rest)) {
                 buildPatternEach(testEnd, result, obj, copy(nil()), d, rest, inAlteration, isSinglePattern, errorString);
-                cond_ne(testEnd, result, tru());
+                cond_ne_true(testEnd, result);
             }
         }
     }
@@ -2350,12 +2360,12 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     protected abstract boolean isNilRest(U rest);
 
-    protected Operand buildPatternLocal(Operand value, RubySymbol name, int line, int depth, boolean inAlternation) {
+    protected void buildPatternLocal(Operand value, RubySymbol name, int line, int depth, boolean inAlternation) {
         if (inAlternation && name.idString().charAt(0) != '_') {
             throwSyntaxError(line, str(getManager().getRuntime(), "illegal variable in alternative pattern (", name, ")"));
         }
 
-        return copy(getLocalVariable(name, depth), value);
+        copy(getLocalVariable(name, depth), value);
     }
 
     protected void buildPatternOr(Label testEnd, Operand original, Variable result, Variable deconstructed, Operand value, U left,
@@ -2400,7 +2410,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         return nil();
     }
 
-    private InterpreterContext buildPrePostExeInner(U body) {
+    private void buildPrePostExeInner(U body) {
         build(body);
 
         // END does not have either explicit or implicit return, so we add one
@@ -2409,7 +2419,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         prependUsedImplicitState(null);
 
         computeScopeFlagsFrom(instructions);
-        return scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
+        scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
     }
 
     protected Operand buildPreExe(U body) {
@@ -2428,8 +2438,21 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
     }
 
     protected Operand buildRange(U beginNode, U endNode, boolean isExclusive) {
-        Operand begin = build(beginNode);
-        Operand end = build(endNode);
+        Operand begin;
+        Operand end;
+
+        // string ranges should have frozen begin and end
+        if (beginNode instanceof StrNode beginString) {
+            begin = new FrozenString(beginString.getValue(), beginString.getCodeRange(), beginString.getFile(), beginString.getLine());
+        } else {
+            begin = build(beginNode);
+        }
+
+        if (endNode instanceof StrNode endString) {
+            end = new FrozenString(endString.getValue(), endString.getCodeRange(), endString.getFile(), endString.getLine());
+        } else {
+            end = build(endNode);
+        }
 
         if (begin instanceof ImmutableLiteral && end instanceof ImmutableLiteral) {
             // endpoints are free of side effects, cache the range after creation
@@ -2481,8 +2504,8 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         if (exceptions == null || exceptions.length == 0) {
             outputExceptionCheck(getManager().getStandardError(), exc, caughtLabel);
         } else {
-            for (int i = 0; i < exceptions.length; i++) {
-                outputExceptionCheck(build(exceptions[i]), exc, caughtLabel);
+            for (U exception: exceptions) {
+                outputExceptionCheck(build(exception), exc, caughtLabel);
             }
         }
 
@@ -2499,8 +2522,16 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         addInstr(new LabelInstr(caughtLabel));
         if (reference != null) {
             Variable exception = addResultInstr(new GetGlobalVariableInstr(temp(), symbol("$!")));
+
             buildAssignment(reference, exception);  // Prism does not desugar
         }
+
+        if (RubyInstanceConfig.FULL_TRACE_ENABLED) {
+            // Explicit line number here because we need a line number for trace before we process any nodes
+            addInstr(getManager().newLineNumber(scope.getLine() + 1));
+            addInstr(new TraceInstr(RubyEvent.RESCUE, getCurrentModuleVariable(), getName(), getFileName(), scope.getLine() + 1));
+        }
+
         Operand x = build(body);
         if (x != U_NIL) { // can be U_NIL if the rescue block has an explicit return
             // Set up node return value 'rv'
@@ -2653,7 +2684,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             addInstr(new ThreadPollInstr(true));
             // Restore $! and jump back to the entry of the rescue block
             RescueBlockInfo rbi = activeRescueBlockStack.peek();
-            addInstr(new PutGlobalVarInstr(symbol("$!"), rbi.savedExceptionVariable));
+            addInstr(new RuntimeHelperCall(temp(), RESET_GVAR_UNDERSCORE, new Operand[] { rbi.savedExceptionVariable }));
             addInstr(new JumpInstr(rbi.entryLabel));
             // Retries effectively create a loop
             scope.setHasLoops();
@@ -2681,7 +2712,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
                 // for non-local returns (from rescue block) we need to restore $! so it does not get carried over
                 if (!activeRescueBlockStack.isEmpty()) {
                     RescueBlockInfo rbi = activeRescueBlockStack.peek();
-                    addInstr(new PutGlobalVarInstr(symbol("$!"), rbi.savedExceptionVariable));
+                    addInstr(new RuntimeHelperCall(temp(), RESET_GVAR_UNDERSCORE, new Operand[] { rbi.savedExceptionVariable }));
                 }
 
                 addInstr(new NonlocalReturnInstr(retVal, definedWithinMethod ? scope.getNearestMethod().getId() : "--none--"));
@@ -2808,8 +2839,9 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
         if (literal != null) {
             if (seenLiterals.contains(literal)) {
-                getManager().getRuntime().getWarnings().warning(IRubyWarnings.ID.MISCELLANEOUS, getFileName(), getLine(value),
-                        "duplicated 'when' clause with line " + (origLocs.get(literal) + 1) + " is ignored");
+                var context = manager.getRuntime().getCurrentContext();
+                warning(context, "'when' clause on line " + getLine(value) +
+                        " duplicates 'when' clause on line " + (origLocs.get(literal) + 1) + " and is ignored");
                 return false;
             } else {
                 seenLiterals.add(literal);
@@ -2840,7 +2872,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         if (keywordArgs.size() == 1 && keywordArgs.get(0).getKey().equals(Symbol.KW_REST_ARG_DUMMY)) {
             flags[0] |= (CALL_KEYWORD | CALL_KEYWORD_REST);
             Operand keywordRest = keywordArgs.get(0).getValue();
-            Operand[] args = callArgs.toArray(new Operand[callArgs.size()]);
+            Operand[] args = callArgs.toArray(new Operand[0]);
             Variable test = addResultInstr(new RuntimeHelperCall(temp(), IS_HASH_EMPTY, new Operand[] { keywordRest }));
             if_else(test, tru(),
                     () -> receiveBreakException(block,
@@ -2858,7 +2890,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     protected Operand buildZSuperIfNest(Variable result, final Operand block) {
         int depthFrom = 0;
-        IRBuilder superBuilder = this;
+        IRBuilder<U,V,W,X,Y,Z> superBuilder = this;
         IRScope superScope = scope;
 
         boolean defineMethod = false;
@@ -2885,7 +2917,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             if (keywordArgs.size() == 1 && keywordArgs.get(0).getKey().equals(Symbol.KW_REST_ARG_DUMMY)) {
                 flags[0] |= (CALL_KEYWORD | CALL_KEYWORD_REST);
                 Operand keywordRest = ((DepthCloneable) keywordArgs.get(0).getValue()).cloneForDepth(depthFromSuper);
-                Operand[] args = adjustVariableDepth(callArgs.toArray(new Operand[callArgs.size()]), depthFromSuper);
+                Operand[] args = adjustVariableDepth(callArgs.toArray(new Operand[0]), depthFromSuper);
                 Variable test = addResultInstr(new RuntimeHelperCall(temp(), IS_HASH_EMPTY, new Operand[]{keywordRest}));
                 if_else(test, tru(),
                         () -> addInstr(new ZSuperInstr(scope, zsuperResult, buildSelf(), args, block, flags[0], scope.maybeUsingRefinements())),
@@ -2930,7 +2962,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
     }
 
 
-    public InterpreterContext defineMethodInner(LazyMethodDefinition<U, V, W, X, Y, Z> defNode, IRScope parent, int coverageMode) {
+    public void defineMethodInner(LazyMethodDefinition<U, V, W, X, Y, Z> defNode, IRScope parent, int coverageMode) {
         long time = 0;
         if (parserTiming) time = System.nanoTime();
         this.coverageMode = coverageMode;
@@ -2965,11 +2997,9 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
         computeScopeFlagsFrom(instructions);
 
-        InterpreterContext ic = scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
+        scope.allocateInterpreterContext(instructions, temporaryVariableIndex + 1, flags);
 
         if (parserTiming) manager.getRuntime().getParserManager().getParserStats().addIRBuildTime(System.nanoTime() - time);
-
-        return ic;
     }
 
     private void prependUsedImplicitState(IRScope parent) {
@@ -2978,7 +3008,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             if (scope instanceof IRMethod) {
                 numberOfInstrs++;
                 addInstrAtBeginning(new LoadImplicitClosureInstr(getYieldClosureVariable()));
-            } else if (!(scope instanceof IRModuleBody) && !(scope instanceof IRClassBody) && !(scope instanceof IRMetaClassBody)) {
+            } else if (!(scope instanceof IRModuleBody)) { // Class MetaClass are IRModuleBody as well.
                 numberOfInstrs++;
                 addInstrAtBeginning(new LoadFrameClosureInstr(getYieldClosureVariable()));
             }
@@ -3110,7 +3140,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             LineInfo needsCoverage = isNewline ? LineInfo.Coverage : null;
             // DefNode will set it's own line number as part of impl but if it is for coverage we emit as instr also.
             if (needsCoverage != null && (!def || coverageMode != 0)) { // Do not emit multiple line number instrs for the same line
-                needsLineNumInfo = isNewline ? needsCoverage : LineInfo.Backtrace;
+                needsLineNumInfo = needsCoverage;
             }
 
             // This line is already process either by linenum or by instr which emits its own.
@@ -3128,12 +3158,9 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
             ByteList methodBytes = methodName.getBytes();
             if (args.length == 1) {
                 refinement = isRefinementCall(methodBytes);
-            } else if (args.length == 2
-                    && CommonByteLists.SEND.equal(methodBytes)) {
-                if (args[0] instanceof Symbol) {
-                    Symbol sendName = (Symbol) args[0];
-                    methodBytes = sendName.getBytes();
-                    refinement = isRefinementCall(methodBytes);
+            } else if (args.length == 2 && CommonByteLists.SEND.equal(methodBytes)) {
+                if (args[0] instanceof Symbol sendName) {
+                    refinement = isRefinementCall(sendName.getBytes());
                 }
             }
         }
@@ -3194,7 +3221,7 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
 
     protected void throwSyntaxError(int line , String message) {
         String errorMessage = getFileName() + ":" + (line + 1) + ": " + message;
-        throw scope.getManager().getRuntime().newSyntaxError(errorMessage);
+        throw scope.getManager().getRuntime().newSyntaxError(errorMessage, getFileName());
     }
 
     protected BinaryType binaryType(U node) {
@@ -3237,8 +3264,8 @@ public abstract class IRBuilder<U, V, W, X, Y, Z> {
         addInstrAtBeginning(new CopyInstr(v, initState));
     }
 
-    private IRBuilder getNearestFlipVariableScopeBuilder() {
-        IRBuilder current = this;
+    private IRBuilder<U, V, W, X, Y, Z> getNearestFlipVariableScopeBuilder() {
+        IRBuilder<U, V, W, X, Y, Z> current = this;
 
         while (current != null && !current.scope.isWhereFlipFlopStateVariableIs()) {
             current = current.parent;

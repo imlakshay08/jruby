@@ -30,6 +30,7 @@
 package org.jruby.ext.socket;
 
 import org.jruby.Ruby;
+import org.jruby.RubyBasicObject;
 import org.jruby.RubyClass;
 import org.jruby.anno.JRubyClass;
 import org.jruby.anno.JRubyMethod;
@@ -41,16 +42,18 @@ import org.jruby.util.io.Sockaddr;
 
 import java.net.InetSocketAddress;
 
-/**
- * @author <a href="mailto:ola.bini@ki.se">Ola Bini</a>
- */
+import static org.jruby.api.Access.symbolClass;
+import static org.jruby.api.Convert.asFixnum;
+import static org.jruby.api.Create.*;
+import static org.jruby.api.Define.defineClass;
+import static org.jruby.api.Error.argumentError;
+
 @JRubyClass(name="IPSocket", parent="BasicSocket")
 public class RubyIPSocket extends RubyBasicSocket {
-    static void createIPSocket(Ruby runtime) {
-        RubyClass rb_cIPSocket = runtime.defineClass("IPSocket", runtime.getClass("BasicSocket"), RubyIPSocket::new);
-
-        rb_cIPSocket.defineAnnotatedMethods(RubyIPSocket.class);
-        rb_cIPSocket.undefineMethod("initialize");
+    static RubyClass createIPSocket(ThreadContext context, RubyClass BasicSocket) {
+        return defineClass(context, "IPSocket", BasicSocket, RubyIPSocket::new).
+                defineMethods(context, RubyIPSocket.class).
+                undefMethods(context, "initialize");
     }
 
     public RubyIPSocket(Ruby runtime, RubyClass type) {
@@ -59,7 +62,7 @@ public class RubyIPSocket extends RubyBasicSocket {
 
     @JRubyMethod(name = "addr")
     public IRubyObject addr(ThreadContext context) {
-        return addrCommon(context, !context.getRuntime().isDoNotReverseLookupEnabled());
+        return addrCommon(context, !context.runtime.isDoNotReverseLookupEnabled());
     }
 
     @JRubyMethod(name = "addr")
@@ -69,7 +72,7 @@ public class RubyIPSocket extends RubyBasicSocket {
 
     @JRubyMethod(name = "peeraddr")
     public IRubyObject peeraddr(ThreadContext context) {
-        return peeraddrCommon(context, !context.getRuntime().isDoNotReverseLookupEnabled());
+        return peeraddrCommon(context, !context.runtime.isDoNotReverseLookupEnabled());
     }
 
     @JRubyMethod(name = "peeraddr")
@@ -84,10 +87,8 @@ public class RubyIPSocket extends RubyBasicSocket {
 
     @JRubyMethod
     public IRubyObject recvfrom(ThreadContext context, IRubyObject _length) {
-        Ruby runtime = context.runtime;
-
         IRubyObject result = recv(context, _length);
-        InetSocketAddress sender = getInetRemoteSocket();
+        InetSocketAddress sender = getInetRemoteSocket(context);
 
         int port;
         String hostName;
@@ -102,14 +103,13 @@ public class RubyIPSocket extends RubyBasicSocket {
             hostAddress = sender.getAddress().getHostAddress();
         }
 
-        IRubyObject addressArray = context.runtime.newArrayNoCopy(
-                runtime.newString("AF_INET"),
-                runtime.newFixnum(port),
-                runtime.newString(hostName),
-                runtime.newString(hostAddress)
-        );
+        IRubyObject addressArray = newArrayNoCopy(context,
+                newString(context, "AF_INET"),
+                asFixnum(context, port),
+                newString(context, hostName),
+                newString(context, hostAddress));
 
-        return runtime.newArray(result, addressArray);
+        return newArray(context, result, addressArray);
     }
 
     @JRubyMethod
@@ -125,16 +125,12 @@ public class RubyIPSocket extends RubyBasicSocket {
 
     @Override
     protected IRubyObject getSocknameCommon(ThreadContext context, String caller) {
-        InetSocketAddress sock = getInetSocketAddress();
-
-        return Sockaddr.packSockaddrFromAddress(context, sock);
+        return Sockaddr.packSockaddrFromAddress(context, getInetSocketAddress());
     }
 
     @Override
     public IRubyObject getpeername(ThreadContext context) {
-       InetSocketAddress sock = getInetRemoteSocket();
-
-       return Sockaddr.packSockaddrFromAddress(context, sock);
+       return Sockaddr.packSockaddrFromAddress(context, getInetRemoteSocket(context));
     }
 
     private IRubyObject addrCommon(ThreadContext context, IRubyObject reverse) {
@@ -166,7 +162,7 @@ public class RubyIPSocket extends RubyBasicSocket {
     }
 
     private IRubyObject peeraddrCommon(ThreadContext context, boolean reverse) {
-        InetSocketAddress address = getInetRemoteSocket();
+        InetSocketAddress address = getInetRemoteSocket(context);
 
         checkAddress(context, address);
 
@@ -174,40 +170,34 @@ public class RubyIPSocket extends RubyBasicSocket {
     }
 
     public static Boolean doReverseLookup(ThreadContext context, IRubyObject noreverse) {
-        if (noreverse == context.tru) {
-            return false;
-        } else if (noreverse == context.fals) {
-            return true;
-        } else if (noreverse == context.nil) {
-            return null;
-        } else {
-            Ruby runtime = context.runtime;
+        if (noreverse == context.tru) return false;
+        if (noreverse == context.fals) return true;
+        if (noreverse == context.nil) return null;
 
-            TypeConverter.checkType(context, noreverse, runtime.getSymbol());
-            switch (noreverse.toString()) {
-                case "numeric": return true;
-                case "hostname": return false;
-                default: throw runtime.newArgumentError("invalid reverse_lookup flag: " + noreverse);
-            }
-        }
+        TypeConverter.checkType(context, noreverse, symbolClass(context));
+        return switch (noreverse.toString()) {
+            case "numeric" -> true;
+            case "hostname" -> false;
+            default -> throw argumentError(context, "invalid reverse_lookup flag: " + noreverse);
+        };
     }
 
-    @Deprecated
+    @Deprecated(since = "1.7.0")
     public IRubyObject addr() {
-        return addr(getRuntime().getCurrentContext());
+        return addr(getCurrentContext());
     }
 
-    @Deprecated
+    @Deprecated(since = "1.7.0")
     public IRubyObject peeraddr() {
-        return peeraddr(getRuntime().getCurrentContext());
+        return peeraddr(getCurrentContext());
     }
 
-    @Deprecated
+    @Deprecated(since = "1.7.0")
     public static IRubyObject getaddress(IRubyObject recv, IRubyObject hostname) {
-        return getaddress(recv.getRuntime().getCurrentContext(), recv, hostname);
+        return getaddress(((RubyBasicObject) recv).getCurrentContext(), recv, hostname);
     }
 
-    @Deprecated
+    @Deprecated(since = "1.7.0")
     public IRubyObject recvfrom(ThreadContext context, IRubyObject[] args) {
         switch (args.length) {
             case 1:
@@ -215,7 +205,7 @@ public class RubyIPSocket extends RubyBasicSocket {
             case 2:
                 return recvfrom(context, args[0], args[1]);
             default:
-                Arity.raiseArgumentError(context.runtime, args, 1, 2);
+                Arity.raiseArgumentError(context, args, 1, 2);
                 return null; // not reached
         }
     }
